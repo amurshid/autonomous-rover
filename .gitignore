@@ -1,0 +1,6 @@
+vpr_data/
+rover_planning/
+vpr/out/features/
+__pycache__/
+*.pyc
+.vscode/
