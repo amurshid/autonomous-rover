@@ -1,0 +1,82 @@
+{
+  "per_session": {
+    "day1_night_session1": {
+      "n": 841,
+      "median_err_m": 0.3073787403188445,
+      "recall@1_1m": 0.8870392390011891,
+      "median_yaw_deg": 6.199403343315511,
+      "yaw_within_30": 0.9227110582639715,
+      "room_acc": 0.9072532699167658
+    },
+    "day1_night_session2": {
+      "n": 1557,
+      "median_err_m": 0.23628948347313256,
+      "recall@1_1m": 0.9177906229929351,
+      "median_yaw_deg": 5.11078353256694,
+      "yaw_within_30": 0.945407835581246,
+      "room_acc": 0.9004495825305073
+    },
+    "day1_night_session3": {
+      "n": 1839,
+      "median_err_m": 0.27622311633894875,
+      "recall@1_1m": 0.8934203371397499,
+      "median_yaw_deg": 5.437369475791511,
+      "yaw_within_30": 0.9168026101141925,
+      "room_acc": 0.878194671016857
+    },
+    "day2_afternoon_300": {
+      "n": 1786,
+      "median_err_m": 0.2578694873561596,
+      "recall@1_1m": 0.9456886898096305,
+      "median_yaw_deg": 4.9474905609546544,
+      "yaw_within_30": 0.9557670772676372,
+      "room_acc": 0.9165733482642777
+    },
+    "day2_afternoon_400": {
+      "n": 1696,
+      "median_err_m": 0.28008550343960337,
+      "recall@1_1m": 0.8879716981132075,
+      "median_yaw_deg": 6.219456866145088,
+      "yaw_within_30": 0.9298349056603774,
+      "room_acc": 0.8991745283018868
+    },
+    "day2_evening_500": {
+      "n": 1976,
+      "median_err_m": 0.3120223211867333,
+      "recall@1_1m": 0.8765182186234818,
+      "median_yaw_deg": 5.915789234725754,
+      "yaw_within_30": 0.9094129554655871,
+      "room_acc": 0.8942307692307693
+    },
+    "day2_evening_600": {
+      "n": 2228,
+      "median_err_m": 0.2630861216471113,
+      "recall@1_1m": 0.855475763016158,
+      "median_yaw_deg": 5.199171072512791,
+      "yaw_within_30": 0.8900359066427289,
+      "room_acc": 0.8864452423698385
+    },
+    "day2_evening_700": {
+      "n": 1952,
+      "median_err_m": 0.3974750255200081,
+      "recall@1_1m": 0.7720286885245902,
+      "median_yaw_deg": 8.448262689203988,
+      "yaw_within_30": 0.7269467213114754,
+      "room_acc": 0.8591188524590164
+    }
+  },
+  "overall": {
+    "median_err_m": 0.28515441430915967,
+    "recall@1_1m": 0.8762522522522522,
+    "median_yaw_deg": 5.763955419016083,
+    "usable_fix_rate": 0.8362522522522523,
+    "usable_fix_rate_gated": 0.9240189256888394
+  },
+  "cold_start": {
+    "gate_never_fired": 0.00125,
+    "median_frames_to_fix": 0.0,
+    "first_fix_usable": 0.8785982478097623,
+    "first_fix_within_2m": 0.9774718397997497,
+    "second_fix_within_1m": 0.9219858156028369
+  }
+}
