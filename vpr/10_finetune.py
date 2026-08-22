@@ -14,10 +14,28 @@ this runs in the 09 regime, not the 04 one:
   val    day1_night_session1 vs the training sessions
   test   day1_night_session3 vs the other seven    (touched once)
 
-Scoping for an 8-thread CPU. Only the last `--blocks` transformer blocks are
-unfrozen; the earlier ones hold generic low-level features that are unlikely to
-need adjusting and are the expensive part of the backward pass. Anchors are
-subsampled per epoch. Roughly 8 min/epoch at the defaults.
+Training setup, and why each piece is there:
+
+  --blocks N    unfreeze the last N transformer blocks. Early blocks hold
+                generic edge and texture features that do not need adjusting.
+  --llrd        layer-wise learning rate decay. The graded version of freezing:
+                each block trains at a fraction of the rate of the one after it,
+                so the whole backbone can stay trainable without early layers
+                being dragged off their pretrained solution. Makes --blocks 12
+                a reasonable thing to run rather than a reckless one.
+  --warmup      linear warmup then cosine decay. The first optimiser steps are
+                where a pretrained backbone gets damaged, because AdamW's
+                second-moment estimate starts near zero and the effective step
+                is much larger than the nominal rate.
+  --amp         bfloat16 autocast, roughly 2x throughput. The loss itself stays
+                in fp32 -- cosine similarities are too closely spaced for bf16's
+                mantissa to rank reliably.
+  --batch-pairs not only a memory knob. The loss mines its hardest negative from
+                inside the batch, so a larger batch is a larger negative pool
+                and a harder objective. Gradient accumulation does not
+                substitute here: it grows the gradient, not the negative pool.
+
+Anchors are subsampled per epoch. Gradients are clipped at norm 1.0.
 
 Descriptors cannot be cached here -- the backbone changes every step, so images
 are loaded and encoded every epoch. That is the whole reason this is slower than
@@ -27,8 +45,10 @@ everything before it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -103,9 +123,11 @@ class Encoder(torch.nn.Module):
                                        "dinov2_vits14", verbose=False)
         for p in self.backbone.parameters():
             p.requires_grad = False
-        n_blocks = min(n_blocks, len(self.backbone.blocks))
+        self.n_depth = len(self.backbone.blocks)
+        n_blocks = min(n_blocks, self.n_depth)
+        self.n_blocks = n_blocks
         trainable = list(self.backbone.blocks[-n_blocks:]) + [self.backbone.norm]
-        if n_blocks >= len(self.backbone.blocks):
+        if n_blocks >= self.n_depth:
             trainable.append(self.backbone.patch_embed)
         for m in trainable:
             for p in m.parameters():
@@ -113,7 +135,43 @@ class Encoder(torch.nn.Module):
         n_tr = sum(p.numel() for p in self.parameters() if p.requires_grad)
         n_all = sum(p.numel() for p in self.parameters())
         print(f"    trainable {n_tr / 1e6:.1f}M of {n_all / 1e6:.1f}M parameters "
-              f"(last {n_blocks} of {len(self.backbone.blocks)} blocks)")
+              f"(last {n_blocks} of {self.n_depth} blocks)")
+
+    def param_groups(self, base_lr: float, decay: float):
+        """Layer-wise learning rate decay.
+
+        Block depth maps to how task-specific a layer is: the last block carries
+        the semantic representation and should move, the first carries edges and
+        texture and should barely move. Freezing is the crude version of this --
+        a hard zero for early layers. Scaling the rate by depth instead lets the
+        whole backbone stay trainable without the early layers being dragged off
+        their pretrained solution, which is what --blocks 12 needs to be safe.
+
+        block d gets base_lr * decay ** (depth - 1 - d), so the final block runs
+        at base_lr and each earlier one at a fraction of it.
+        """
+        groups, seen = [], set()
+
+        def add(module, lr, tag):
+            ps = [p for p in module.parameters() if p.requires_grad
+                  and id(p) not in seen]
+            if not ps:
+                return
+            seen.update(id(p) for p in ps)
+            groups.append({"params": ps, "lr": lr, "tag": tag})
+
+        add(self.backbone.norm, base_lr, "norm")
+        for d in range(self.n_depth - 1, -1, -1):
+            scale = decay ** (self.n_depth - 1 - d)
+            add(self.backbone.blocks[d], base_lr * scale, f"block{d}")
+        add(self.backbone.patch_embed, base_lr * decay ** self.n_depth, "patch")
+
+        if groups:
+            lrs = [g["lr"] for g in groups]
+            print(f"    layer-wise LR decay {decay}: "
+                  f"{max(lrs):.2e} (last) down to {min(lrs):.2e} (first), "
+                  f"{len(groups)} groups")
+        return groups
 
     def forward(self, x):
         out = self.backbone.forward_features(x)
@@ -136,6 +194,34 @@ class PathDataset(Dataset):
         return load_img(self.paths[i])
 
 
+def warmup_cosine(step: int, total: int, warmup_frac: float = 0.1) -> float:
+    """LR multiplier: linear warmup, then cosine decay toward zero.
+
+    Warmup exists because the first optimiser steps are the dangerous ones.
+    AdamW's second-moment estimate starts near zero, so the effective step size
+    early on is far larger than the nominal rate -- which is exactly when a
+    pretrained backbone gets damaged. Ramping in avoids that. The cosine tail
+    then lets training settle instead of bouncing at full rate to the last step.
+    """
+    warm = max(1, int(total * warmup_frac))
+    if step < warm:
+        return (step + 1) / warm
+    progress = (step - warm) / max(1, total - warm)
+    return 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+
+
+def amp_context(device: torch.device, enabled: bool):
+    """bfloat16 autocast where it is supported, a no-op otherwise.
+
+    bf16 rather than fp16 because it keeps float32's exponent range, so no
+    GradScaler is needed -- and GradScaler is CUDA-only anyway, which would not
+    help on Apple Silicon.
+    """
+    if not enabled or device.type == "cpu":
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+
+
 def pick_device(requested: str = "auto") -> torch.device:
     """cuda > mps > cpu. MPS is the Apple Silicon GPU backend."""
     if requested != "auto":
@@ -148,12 +234,16 @@ def pick_device(requested: str = "auto") -> torch.device:
 
 
 @torch.no_grad()
-def encode(model, paths, device, batch_size=64, workers=6):
+def encode(model, paths, device, batch_size=64, workers=6, amp=True):
     """Descriptors for a list of paths using the current weights."""
     model.eval()
     loader = DataLoader(PathDataset(paths), batch_size=batch_size,
                         num_workers=workers)
-    out = [model(b.to(device)).cpu().numpy() for b in loader]
+    out = []
+    for b in loader:
+        with amp_context(device, amp):
+            f = model(b.to(device))
+        out.append(f.float().cpu().numpy())
     model.train()
     return np.concatenate(out).astype(np.float32)
 
@@ -169,8 +259,20 @@ def main():
                     help="how many trailing transformer blocks to unfreeze")
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--anchors-per-epoch", type=int, default=3000)
-    ap.add_argument("--batch-pairs", type=int, default=16)
+    # Batch size is not just a memory knob here. batch_hard_triplet mines its
+    # hardest negative from inside the batch, so a bigger batch means a bigger
+    # negative pool and a harder, more informative loss. Gradient accumulation
+    # would NOT substitute: it enlarges the gradient but each micro-batch still
+    # only sees its own 16 pairs, so the negatives stay just as easy.
+    ap.add_argument("--batch-pairs", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-5)
+    ap.add_argument("--llrd", type=float, default=0.75,
+                    help="layer-wise LR decay per block, 1.0 disables it")
+    ap.add_argument("--warmup", type=float, default=0.1,
+                    help="fraction of total steps spent warming up")
+    ap.add_argument("--amp", action="store_true", default=True,
+                    help="bfloat16 autocast (default on; --no-amp to disable)")
+    ap.add_argument("--no-amp", dest="amp", action="store_false")
     ap.add_argument("--margin", type=float, default=0.1)
     ap.add_argument("--val-every", type=int, default=2)
     ap.add_argument("--val-stride", type=int, default=4,
@@ -206,15 +308,26 @@ def main():
     print("\n  Building model:")
     model = Encoder(args.blocks).to(device)
     model.train()
-    params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=1e-4)
+    if args.llrd < 1.0:
+        groups = model.param_groups(args.lr, args.llrd)
+    else:
+        groups = [{"params": [p for p in model.parameters() if p.requires_grad],
+                   "lr": args.lr, "tag": "all"}]
+    opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=1e-4)
+    base_lrs = [g["lr"] for g in opt.param_groups]
+
+    steps_per_epoch = max(1, min(args.anchors_per_epoch, 8974) // args.batch_pairs)
+    total_steps = steps_per_epoch * args.epochs
+    print(f"    {steps_per_epoch} steps/epoch, {total_steps} total, "
+          f"amp={'bf16' if args.amp and device.type != 'cpu' else 'off'}")
+    step = 0
 
     val_paths = val_df["path"].tolist()
     val_ref_paths = val_ref["path"].tolist()
 
     def validate():
-        f_ref = encode(model, val_ref_paths, device, workers=args.workers)
-        f_q = encode(model, val_paths, device, workers=args.workers)
+        f_ref = encode(model, val_ref_paths, device, workers=args.workers, amp=args.amp)
+        f_q = encode(model, val_paths, device, workers=args.workers, amp=args.amp)
         return score_from(f_ref, f_q, val_ref, val_df)
 
     print("\n  Validating before training (should match the frozen baseline)...")
@@ -235,22 +348,35 @@ def main():
 
         losses = []
         for anc_img, pos_img, anc_xy, pos_xy in loader:
+            mult = warmup_cosine(step, total_steps, args.warmup)
+            for g, base in zip(opt.param_groups, base_lrs):
+                g["lr"] = base * mult
+
             imgs = torch.cat([anc_img, pos_img], dim=0).to(device)
-            emb_all = model(imgs)
+            with amp_context(device, args.amp):
+                emb_all = model(imgs)
+            # The loss runs in fp32: cosine similarities sit close together and
+            # bf16's 8-bit mantissa is too coarse to rank them reliably.
+            emb_all = emb_all.float()
+
             b = len(anc_img)
             # Interleave so rows 2i / 2i+1 are a pair, as batch_hard_triplet
-            # expects. torch.empty would not track gradients, so build by index.
+            # expects. Built with stack/reshape to keep the autograd graph.
             emb = torch.stack([emb_all[:b], emb_all[b:]], dim=1).reshape(2 * b, -1)
             xy = torch.stack([anc_xy, pos_xy], dim=1).reshape(2 * b, 2).to(device)
 
             loss = T.batch_hard_triplet(emb, xy, margin=args.margin)
             opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad], 1.0)
             opt.step()
             losses.append(loss.item())
+            step += 1
 
         mins = (time.time() - t0) / 60
-        line = f"    epoch {epoch:3d}  loss {np.mean(losses):.4f}  ({mins:.1f} min)"
+        line = (f"    epoch {epoch:3d}  loss {np.mean(losses):.4f}  "
+                f"lr {opt.param_groups[0]['lr']:.2e}  ({mins:.1f} min)")
         if epoch % args.val_every == 0 or epoch == args.epochs - 1:
             m = validate()
             curve.append((epoch, float(np.mean(losses)), m["recall@1_1.0m"]))
@@ -266,7 +392,8 @@ def main():
     model.load_state_dict(best["state"])
 
     print("\n  Encoding everything with the fine-tuned backbone...")
-    feats_ft = encode(model, df["path"].tolist(), device, workers=args.workers)
+    feats_ft = encode(model, df["path"].tolist(), device, workers=args.workers,
+                      amp=args.amp)
     np.save(OUT / "features" / "finetuned_full.npy", feats_ft)
     base = Fx.extract_cached(df, backbone="dinov2_vits14")
 
