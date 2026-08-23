@@ -30,6 +30,82 @@ def retrieve(query_feats: np.ndarray, ref_feats: np.ndarray, k: int = 1,
     return idx, sim
 
 
+# --- post-processing ------------------------------------------------------
+# Two cheap steps that sit between retrieval and the reported pose. Neither
+# involves training, and both reuse the top-k that the confidence gate already
+# needs, so they cost nothing at inference.
+
+AGG_TEMP = 0.05     # softmax temperature over cosine similarity
+SEQ_N = 3           # frames of history the sequence filter looks back over
+SEQ_BASE = 0.5      # metres of slack beyond what the rover could have driven
+FRAME_SPACING = 0.2 # the logger's own trigger distance, from the rover config
+
+
+def top_k_spread(ref_xy: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """Mean distance of the top-k retrieved positions from their centroid.
+
+    The confidence signal from 03: if the k nearest reference frames disagree
+    about where they are, the match is a coincidence.
+    """
+    tk = ref_xy[idx]
+    return np.hypot(*(tk - tk.mean(1, keepdims=True)).transpose(2, 0, 1)).mean(1)
+
+
+def aggregate(ref_xy: np.ndarray, idx: np.ndarray, sim: np.ndarray,
+              temp: float = AGG_TEMP) -> np.ndarray:
+    """Similarity-weighted mean of the top-k retrieved positions.
+
+    Copying the top-1 pose cannot be more precise than the database's own
+    spacing -- the logger saved a frame every 0.2 m, so the nearest recorded
+    frame is typically that far from the true camera position even when
+    retrieval is perfect. Averaging the neighbours can land between recorded
+    frames, which is where the answer usually is.
+
+    Weights are a softmax over cosine similarity, so a clearly-better match
+    dominates and a near-tie blends.
+    """
+    w = np.exp((sim - sim[:, :1]) / temp)
+    w /= w.sum(1, keepdims=True)
+    return (ref_xy[idx] * w[..., None]).sum(1)
+
+
+def sequence_filter(pred: np.ndarray, n: int = SEQ_N, base: float = SEQ_BASE,
+                    spacing: float = FRAME_SPACING) -> np.ndarray:
+    """Reject estimates that disagree with recent history by more than the
+    rover could have driven.
+
+    Frames arrive about `spacing` metres apart, so over an n-frame window the
+    rover legitimately moves ~n*spacing. A larger jump than that is not motion,
+    it is a bad match -- the corridor aliasing that produces the error tail.
+    Those get replaced by the median of the recent estimates.
+
+    Two details matter and both were found by getting them wrong first:
+
+    - It compares against the *raw* estimates, never its own corrected output.
+      Feeding corrections back creates a loop: one substitution freezes the
+      estimate, the rover drives away from it, and every subsequent frame then
+      looks like an outlier and gets frozen too.
+    - It rejects rather than averages. Averaging positions over a moving rover
+      smears `spacing` metres of travel into every estimate and destroys the
+      median even as it improves the tail.
+
+    Returns (positions, overridden). The mask matters: yaw still comes from the
+    top-1 retrieved frame, and on an overridden frame that frame is exactly the
+    bad match the filter just rejected. Reporting the corrected position with
+    its stale heading would be worse than reporting nothing, so the caller
+    should treat an overridden frame as one the confidence gate refuses.
+    """
+    out = pred.copy()
+    overridden = np.zeros(len(pred), dtype=bool)
+    tau = base + spacing * n
+    for i in range(2, len(pred)):
+        m = np.median(pred[max(0, i - n):i], axis=0)
+        if np.hypot(*(pred[i] - m)) > tau:
+            out[i] = m
+            overridden[i] = True
+    return out, overridden
+
+
 def evaluate(query: pd.DataFrame, ref: pd.DataFrame, idx: np.ndarray,
              thresholds=(0.25, 0.5, 1.0, 2.0)) -> dict:
     """Metrics for top-1 retrieval, plus recall@k using the k columns of idx."""

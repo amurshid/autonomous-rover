@@ -1,0 +1,35 @@
+{
+  "per_session": {
+    "day1_night_session3": {
+      "n": 1839,
+      "median_err_m": 0.2762231163389488,
+      "recall@1_1m": 0.8934203371397499,
+      "median_yaw_deg": 5.437369475791511,
+      "yaw_within_30": 0.9168026101141925,
+      "room_acc": 0.878194671016857
+    },
+    "day2_evening_700": {
+      "n": 1952,
+      "median_err_m": 0.39648521660704916,
+      "recall@1_1m": 0.7720286885245902,
+      "median_yaw_deg": 8.448262689203988,
+      "yaw_within_30": 0.7269467213114754,
+      "room_acc": 0.8591188524590164
+    }
+  },
+  "held_out_only": null,
+  "overall": {
+    "median_err_m": 0.3174327802858424,
+    "recall@1_1m": 0.8309153257715642,
+    "median_yaw_deg": 6.600473799907094,
+    "usable_fix_rate": 0.7581113162753891,
+    "usable_fix_rate_gated": 0.8727072633895818
+  },
+  "cold_start": {
+    "gate_never_fired": 0.0016666666666666668,
+    "median_frames_to_fix": 0.0,
+    "first_fix_usable": 0.7946577629382304,
+    "first_fix_within_2m": 0.9632721202003339,
+    "second_fix_within_1m": 0.9110738255033557
+  }
+}
