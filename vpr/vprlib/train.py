@@ -70,17 +70,24 @@ class Projection(nn.Module):
         return F.normalize(self.fc(x), dim=1)
 
 
-def batch_hard_triplet(emb, xy, margin=0.1):
+def batch_hard_triplet(emb, xy, margin=0.1, n_pairs=None):
     """Batch-hard triplet loss on an (anchor, positive) interleaved batch.
 
     emb: (2B, D) normalised, rows 2i and 2i+1 are a pair.
     Negatives are mined inside the batch, but only from frames that are
     genuinely far away — otherwise the "negative" is a frame two steps down the
     corridor and the loss punishes the model for being right.
+
+    `n_pairs` allows extra rows to be appended after the 2B pair rows. They are
+    scored as candidate negatives but are never used as anchors or positives,
+    which is what lets globally-mined hard negatives be injected into a batch:
+    the in-batch pool stops being whatever happened to be sampled and starts
+    including the frames this model actually confuses with the anchor.
     """
     sim = emb @ emb.T
     n = len(emb)
-    anchors = torch.arange(0, n, 2)
+    n_pair_rows = n if n_pairs is None else 2 * n_pairs
+    anchors = torch.arange(0, n_pair_rows, 2)
     positives = anchors + 1
 
     geo = torch.cdist(xy, xy)

@@ -52,3 +52,39 @@ def simulate_night(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         x += rng.normal(0.0, sigma, x.shape).astype(np.float32)
 
     return np.clip(x * 255.0, 0, 255).astype(np.uint8)
+
+
+# --- motion blur -----------------------------------------------------------
+# Measured on the dataset: variance-of-Laplacian has a median of 167, and the
+# blurriest 5% of frames sit below 24. Those frames are ~17x more likely to
+# produce a gross retrieval error than a sharp one, so they are worth training
+# against rather than only filtering at query time.
+#
+# The kernel is short because the effect is strong: measured on 200 frames,
+# 2 px takes the median from 192 down to ~60, 3 px to 34, and 5 px to 17.5.
+# Anything longer produces frames blurrier than the worst real ones, which
+# would be training against a failure mode the rover does not have.
+BLUR_LEN = (2, 6)
+
+
+def motion_blur(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """img: HxWx3 uint8. Linear blur of a random length and direction.
+
+    A rover frame is blurred by the platform turning or driving, which smears
+    along one axis -- unlike a Gaussian blur, which smears equally in every
+    direction and is the wrong shape for this failure mode.
+    """
+    import cv2
+
+    length = int(rng.integers(*BLUR_LEN))
+    if length < 2:
+        return img
+    k = np.zeros((length, length), np.float32)
+    k[length // 2, :] = 1.0
+    M = cv2.getRotationMatrix2D(((length - 1) / 2, (length - 1) / 2),
+                                float(rng.uniform(0, 180)), 1.0)
+    k = cv2.warpAffine(k, M, (length, length))
+    s = k.sum()
+    if s <= 0:
+        return img
+    return cv2.filter2D(img, -1, k / s)

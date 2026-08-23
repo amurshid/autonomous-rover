@@ -63,6 +63,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vprlib import augment as Aug     # noqa: E402
 from vprlib import data as D          # noqa: E402
 from vprlib import features as Fx     # noqa: E402
 from vprlib import retrieval as R     # noqa: E402
@@ -76,8 +77,13 @@ VAL_SESSION = "day1_night_session1"
 TEST_SESSION = "day1_night_session3"
 
 
-def load_img(path, size=224):
-    im = Image.open(path).convert("RGB").resize((size, size), Image.BILINEAR)
+def load_img(path, size=224, blur_rng=None):
+    im = Image.open(path).convert("RGB")
+    if blur_rng is not None:
+        # Blur at native 320x240, before the resize -- the same order the
+        # camera and the resize pipeline would apply it in.
+        im = Image.fromarray(Aug.motion_blur(np.array(im), blur_rng))
+    im = im.resize((size, size), Image.BILINEAR)
     x = torch.from_numpy(np.array(im)).permute(2, 0, 1).float() / 255.0
     mean = torch.tensor(Fx.IMAGENET_MEAN).view(3, 1, 1)
     std = torch.tensor(Fx.IMAGENET_STD).view(3, 1, 1)
@@ -85,23 +91,73 @@ def load_img(path, size=224):
 
 
 class PairDataset(Dataset):
-    """Yields (anchor, positive) image pairs and their poses."""
+    """Yields (anchor, positive) image pairs and their poses.
 
-    def __init__(self, df, anchors, pos_index, seed=0):
+    With `neg_index`, each item also carries a globally-mined hard negative --
+    a frame that looks like the anchor to the current descriptor but was
+    recorded far away. Those are the corridor confusions that produce the error
+    tail, and sampling them deliberately puts them in front of the loss instead
+    of waiting for one to turn up in a random batch.
+    """
+
+    def __init__(self, df, anchors, pos_index, seed=0, neg_index=None,
+                 blur_p=0.0):
         self.paths = df["path"].to_numpy()
         self.xy = df[["x", "y"]].to_numpy().astype(np.float32)
         self.anchors = anchors
         self.pos_index = pos_index
+        self.neg_index = neg_index
+        self.blur_p = blur_p
+        self.seed = seed
         self.rng = np.random.default_rng(seed)
 
     def __len__(self):
         return len(self.anchors)
 
+    def _load(self, row, rng):
+        # Per-item, per-epoch seed: DataLoader workers each get a copy of the
+        # dataset, so a shared rng would repeat across workers.
+        blur = rng if (self.blur_p and rng.random() < self.blur_p) else None
+        return load_img(self.paths[row], blur_rng=blur)
+
     def __getitem__(self, i):
+        rng = np.random.default_rng(self.seed * 1_000_003 + i)
         a = int(self.anchors[i])
-        p = int(self.rng.choice(self.pos_index[a]))
-        return (load_img(self.paths[a]), load_img(self.paths[p]),
-                torch.from_numpy(self.xy[a]), torch.from_numpy(self.xy[p]))
+        p = int(rng.choice(self.pos_index[a]))
+        out = [self._load(a, rng), self._load(p, rng),
+               torch.from_numpy(self.xy[a]), torch.from_numpy(self.xy[p])]
+        if self.neg_index is not None:
+            n = int(rng.choice(self.neg_index[a]))
+            out += [self._load(n, rng), torch.from_numpy(self.xy[n])]
+        return tuple(out)
+
+
+def mine_hard_negatives(feats, xy, anchors, min_dist=5.0, top=20, block=512):
+    """For each anchor, the most similar frames that are recorded far away.
+
+    These are perceptual aliases -- two stretches of corridor that genuinely
+    look alike -- and they are what the error tail is made of: 4% of queries
+    carry 40% of the total error mass. The in-batch mining in
+    batch_hard_triplet can only pick the hardest negative that happened to be
+    sampled; this finds the hardest ones in the whole training set.
+
+    Mined from the frozen descriptors so the pool does not depend on which runs
+    happened before it.
+    """
+    out = {}
+    anchors = np.asarray(anchors)
+    k = min(top, len(feats) - 1)
+    for s in range(0, len(anchors), block):
+        rows = anchors[s:s + block]
+        sim = feats[rows] @ feats.T
+        d = np.hypot(*(xy[None, :, :] - xy[rows][:, None, :]).transpose(2, 0, 1))
+        sim[d <= min_dist] = -2.0
+        idx = np.argpartition(-sim, kth=k - 1, axis=1)[:, :k]
+        for j, r in enumerate(rows):
+            cand = idx[j][sim[j, idx[j]] > -2.0]
+            if len(cand):
+                out[int(r)] = cand
+    return out
 
 
 class Encoder(torch.nn.Module):
@@ -274,6 +330,13 @@ def main():
                     help="bfloat16 autocast (default on; --no-amp to disable)")
     ap.add_argument("--no-amp", dest="amp", action="store_false")
     ap.add_argument("--margin", type=float, default=0.1)
+    ap.add_argument("--hard-negatives", type=int, default=0,
+                    help="pool size per anchor for globally-mined hard "
+                         "negatives; 0 keeps in-batch mining only")
+    ap.add_argument("--neg-min-dist", type=float, default=5.0,
+                    help="a mined negative must be at least this far away")
+    ap.add_argument("--blur-p", type=float, default=0.0,
+                    help="probability of motion-blurring a training image")
     ap.add_argument("--val-every", type=int, default=2)
     ap.add_argument("--val-stride", type=int, default=4,
                     help="subsample the validation reference set by this factor")
@@ -305,6 +368,21 @@ def main():
     total = sum(len(v) for v in pos.values())
     print(f"    {len(pos)} anchors, {cross / total:.1%} of pairs cross day/night")
 
+    neg = None
+    if args.hard_negatives:
+        print("\n  Mining hard negatives from the frozen descriptors...")
+        base_train = Fx.extract_cached(df, backbone="dinov2_vits14")[
+            train_df["_row"].to_numpy()]
+        neg = mine_hard_negatives(base_train, train_df[["x", "y"]].to_numpy(),
+                                  list(pos), min_dist=args.neg_min_dist,
+                                  top=args.hard_negatives)
+        d = [float(np.hypot(*(train_df[["x", "y"]].to_numpy()[v]
+                              - train_df[["x", "y"]].to_numpy()[k]).T).mean())
+             for k, v in list(neg.items())[:500]]
+        print(f"    {len(neg)} anchors have a pool, mean distance to their "
+              f"mined negatives {np.mean(d):.1f} m")
+        keys = np.array([k for k in keys if k in neg])
+
     print("\n  Building model:")
     model = Encoder(args.blocks).to(device)
     model.train()
@@ -316,7 +394,7 @@ def main():
     opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=1e-4)
     base_lrs = [g["lr"] for g in opt.param_groups]
 
-    steps_per_epoch = max(1, min(args.anchors_per_epoch, 8974) // args.batch_pairs)
+    steps_per_epoch = max(1, min(args.anchors_per_epoch, len(keys)) // args.batch_pairs)
     total_steps = steps_per_epoch * args.epochs
     print(f"    {steps_per_epoch} steps/epoch, {total_steps} total, "
           f"amp={'bf16' if args.amp and device.type != 'cpu' else 'off'}")
@@ -342,17 +420,24 @@ def main():
         t0 = time.time()
         sel = rng.choice(keys, size=min(args.anchors_per_epoch, len(keys)),
                          replace=False)
-        ds = PairDataset(train_df, sel, pos, seed=epoch)
+        ds = PairDataset(train_df, sel, pos, seed=epoch + 1, neg_index=neg,
+                         blur_p=args.blur_p)
         loader = DataLoader(ds, batch_size=args.batch_pairs, shuffle=True,
                             num_workers=args.workers, drop_last=True)
 
         losses = []
-        for anc_img, pos_img, anc_xy, pos_xy in loader:
+        for batch in loader:
+            if neg is None:
+                anc_img, pos_img, anc_xy, pos_xy = batch
+                neg_img = neg_xy = None
+            else:
+                anc_img, pos_img, anc_xy, pos_xy, neg_img, neg_xy = batch
             mult = warmup_cosine(step, total_steps, args.warmup)
             for g, base in zip(opt.param_groups, base_lrs):
                 g["lr"] = base * mult
 
-            imgs = torch.cat([anc_img, pos_img], dim=0).to(device)
+            parts = [anc_img, pos_img] + ([neg_img] if neg_img is not None else [])
+            imgs = torch.cat(parts, dim=0).to(device)
             with amp_context(device, args.amp):
                 emb_all = model(imgs)
             # The loss runs in fp32: cosine similarities sit close together and
@@ -362,10 +447,17 @@ def main():
             b = len(anc_img)
             # Interleave so rows 2i / 2i+1 are a pair, as batch_hard_triplet
             # expects. Built with stack/reshape to keep the autograd graph.
-            emb = torch.stack([emb_all[:b], emb_all[b:]], dim=1).reshape(2 * b, -1)
+            emb = torch.stack([emb_all[:b], emb_all[b:2 * b]],
+                              dim=1).reshape(2 * b, -1)
             xy = torch.stack([anc_xy, pos_xy], dim=1).reshape(2 * b, 2).to(device)
+            if neg_img is not None:
+                # Appended after the pair rows: scored as candidate negatives,
+                # never used as an anchor or a positive.
+                emb = torch.cat([emb, emb_all[2 * b:]], dim=0)
+                xy = torch.cat([xy, neg_xy.to(device)], dim=0)
 
-            loss = T.batch_hard_triplet(emb, xy, margin=args.margin)
+            loss = T.batch_hard_triplet(emb, xy, margin=args.margin,
+                                        n_pairs=b)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -418,7 +510,7 @@ def main():
 
     day_ref = df[df.condition == "day"].reset_index(drop=True)
     held = df[df.session.isin([VAL_SESSION, TEST_SESSION])].reset_index(drop=True)
-    print(f"\n  === Cross-illuminant: held-out night vs DAY-ONLY database ===")
+    print("\n  === Cross-illuminant: held-out night vs DAY-ONLY database ===")
     cross_rows = {}
     for name, f in variants:
         m = score_from(f[day_ref["_row"].to_numpy()],
