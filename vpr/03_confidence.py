@@ -25,30 +25,44 @@ from vprlib import features as Fx      # noqa: E402
 from vprlib import retrieval as R      # noqa: E402
 
 OUT = Path(__file__).resolve().parent / "out"
+FINETUNED = OUT / "features" / "finetuned_tuned.npy"
 BACKBONE = "dinov2_vits14"
 K = 5
 
 
-def main():
-    df = D.label_rooms(D.load_all(verify=False))
-    df["_row"] = np.arange(len(df))
-    feats = Fx.extract_cached(df, backbone=BACKBONE)
+# The fine-tuned backbone trained on day1_night_session2 and chose its epoch on
+# day1_night_session1, so those two are no longer valid queries for it. Only
+# day1_night_session3 is untouched. The frozen backbone trained on nothing and
+# can be queried with all of them, which is what the original measurement did.
+UNTOUCHED_NIGHT = "day1_night_session3"
 
+
+def analyse(df, feats, postproc, tag, suffix, night_sessions=None):
+    """Gating behaviour for one configuration.
+
+    The gate is unchanged by post-processing -- it reads the spread of the
+    top-k retrieved *positions*, which aggregation and the sequence filter do
+    not touch. What changes is the error it is gating on, so the trade-off
+    curve has to be remeasured for the configuration that would ship.
+    """
+    print(f"\n{'=' * 78}\n  {tag}\n{'=' * 78}")
     day, night = D.split_day_night(df)
+    if night_sessions is not None:
+        night = night[night.session.isin(night_sessions)].reset_index(drop=True)
     idx, sim = R.retrieve(feats[night["_row"].to_numpy()],
                           feats[day["_row"].to_numpy()], k=K)
 
     ref_xy = day[["x", "y"]].to_numpy()
     true_xy = night[["x", "y"]].to_numpy()
-    err = np.hypot(*(ref_xy[idx[:, 0]] - true_xy).T)
-
-    # Spread: median distance of the top-k retrieved points from their centroid.
-    topk_xy = ref_xy[idx]                       # (N, K, 2)
-    centroid = topk_xy.mean(axis=1, keepdims=True)
-    spread = np.hypot(*(topk_xy - centroid).transpose(2, 0, 1)).mean(axis=1)
+    if postproc:
+        pred, overridden = R.sequence_filter(R.aggregate(ref_xy, idx, sim))
+    else:
+        pred, overridden = ref_xy[idx[:, 0]], np.zeros(len(idx), bool)
+    err = np.hypot(*(pred - true_xy).T)
+    spread = np.where(overridden, np.inf, R.top_k_spread(ref_xy, idx))
 
     print(f"\n  {len(night)} night queries against {len(day)} day references, "
-          f"{BACKBONE}, k={K}")
+          f"k={K}")
     print(f"  overall median error {np.median(err):.2f} m, "
           f"R@1<1m {np.mean(err <= 1.0):.3f}\n")
 
@@ -99,9 +113,23 @@ def main():
     axes[1].legend()
 
     fig.tight_layout()
-    fig.savefig(OUT / "confidence.png", dpi=110)
+    fig.savefig(OUT / f"confidence{suffix}.png", dpi=110)
     plt.close(fig)
-    print(f"\n  Wrote confidence.png to {OUT}")
+    print(f"\n  Wrote confidence{suffix}.png to {OUT}")
+
+
+def main():
+    df = D.label_rooms(D.load_all(verify=False))
+    df["_row"] = np.arange(len(df))
+    analyse(df, Fx.extract_cached(df, backbone=BACKBONE), False,
+            "frozen DINOv2, top-1 pose (the original measurement)", "")
+    if FINETUNED.exists():
+        analyse(df, np.load(FINETUNED), True,
+                "fine-tuned backbone + aggregation + sequence filter "
+                "(shipped configuration, untouched night session only)",
+                "_shipped", night_sessions=[UNTOUCHED_NIGHT])
+    else:
+        print(f"\n  {FINETUNED.name} not found -- run 10_finetune.py first.")
 
 
 if __name__ == "__main__":
