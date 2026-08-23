@@ -1,0 +1,27 @@
+# Environment for everything in vpr/. Created on the M5 Mac after the move off
+# Windows desktop, which had no usable PyTorch GPU backend -- the macOS wheels
+# backend, which is what makes 10_finetune.py practical here.
+#
+#   conda env create -f environment.yml
+#   conda activate rover-vpr
+#
+# Pinned loosely on purpose: nothing here depends on a specific version, and
+# the descriptor cache in out/features/ is machine-specific anyway.
+name: rover-vpr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # From PyPI rather than conda-forge: the PyPI macOS wheels are the ones
+      # built with MPS.
+      - torch
+      - torchvision
+      - numpy
+      - pandas
+      - matplotlib
+      - pillow
+      - scikit-learn
+      # 01_explore.py only, for the BGR/RGB channel check.
+      - opencv-python
