@@ -1,6 +1,6 @@
-# Environment for everything in vpr/. Created on the M5 Mac after the move off
-# Windows desktop, which had no usable PyTorch GPU backend -- the macOS wheels
-# backend, which is what makes 10_finetune.py practical here.
+# Environment for everything in vpr/. Created on the M5 Mac after moving off the
+# Windows desktop, which had no usable PyTorch GPU backend -- torch's macOS
+# wheels carry MPS, which is what makes 10_finetune.py practical.
 #
 #   conda env create -f environment.yml
 #   conda activate rover-vpr

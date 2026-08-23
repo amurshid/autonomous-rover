@@ -9,8 +9,8 @@ number partly a measurement of the thing that was selected on, which is the
 mistake the split-by-session discipline exists to prevent.
 
 The margin at stake is small enough for that to matter: the runs land within
-0.05 m of each other and of the 09 linear head, and the standing rule here is to
-treat anything under 0.02 as noise.
+0.05 m of each other and of the 09 linear head, and the standing rule on this
+dataset is to treat anything under 0.02 as noise.
 
 So this reloads each saved backbone, re-encodes every frame with it,
 and reports the same evaluations split by query session:

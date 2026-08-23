@@ -1,9 +1,8 @@
 # VPR — visual relocalisation for the Wave Rover
 
-Given a camera frame from inside
-the house, return a map-frame pose — position and yaw — by embedding the frame
-and retrieving the nearest reference frame, whose pose is known from
-Cartographer at recording time.
+Given a camera frame from inside the house, return a map-frame pose — position
+and yaw — by embedding the frame and retrieving the nearest reference frame,
+whose pose is known from Cartographer at recording time.
 
 ```
 python 01_explore.py             # load, verify, trajectories, channel check
@@ -168,7 +167,7 @@ doing much less work than it used to, because there is much less to reject.
 `out/error_map_dinov2_vits14.png` shows where the failures live: room interiors
 are accurate and the errors concentrate in the central corridors between dining,
 kitchen and entrance — repetitive, low-texture transit space. That is the
-complementary failure mode to lidar's, the argument for carrying both.
+complementary failure mode to lidar's, which is the argument for carrying both.
 
 ---
 
