@@ -16,8 +16,14 @@ Cartographer's finish/start-trajectory restart.
 Needs the bundle from vpr/deploy/export.py and nothing from the network:
 the encoder is TorchScript, so torch.hub is never called.
 
+    python3 vpr_relocalise.py --bundle ~/vpr_deploy --self-test
+    python3 vpr_relocalise.py --bundle ~/vpr_deploy --bench 20
     python3 vpr_relocalise.py --bundle ~/vpr_deploy
     python3 vpr_relocalise.py --bundle ~/vpr_deploy --publish
+
+--self-test and --bench import no ROS and need no camera, so a fresh Pi can be
+checked for a loadable model and acceptable latency before ROS 2 is sourced --
+which is the order the two failures want to be found in.
 
 Relocaliser below has no ROS dependency on purpose -- it is exercised against
 the recorded dataset by vpr/deploy/replay.py, so the logic is verified before it
@@ -151,6 +157,55 @@ class Relocaliser:
                         for b in g["images"]])
         cos = (got * g["descriptors"]).sum(1)
         return bool(cos.min() >= tol), float(cos.min())
+
+
+# --- off-robot entry points -----------------------------------------------
+# Everything here runs on torch, numpy and PIL alone. Kept ahead of build_node
+# so a Pi with no ROS environment can still answer the two questions that
+# decide whether the deployment is viable at all: does the model load, and how
+# slow is one frame.
+
+def run_self_test(args) -> int:
+    loc = Relocaliser(args.bundle, gate=args.gate)
+    ok, worst = loc.self_test()
+    print(f"self-test {'PASSED' if ok else 'FAILED'} (worst cosine {worst:.6f}, "
+          f"tolerance {loc.manifest['golden']['tolerance']})")
+    if not ok:
+        print("This Pi does not reproduce the descriptors the database was "
+              "built from. Check torch version, channel order, resize filter "
+              "and normalisation before trusting anything downstream.")
+    return 0 if ok else 1
+
+
+def run_bench(args) -> int:
+    """Time locate() on the golden frames -- the same work the node does per
+    frame, embedding plus the retrieval matmul."""
+    loc = Relocaliser(args.bundle, gate=args.gate)
+    g = np.load(Path(args.bundle) / "golden.npz", allow_pickle=True)
+    frames = [np.array(Image.open(io.BytesIO(b)).convert("RGB"))
+              for b in g["images"]]
+
+    # The first inference pays for lazy TorchScript setup and is not
+    # representative of the steady state, so it is reported, not averaged in.
+    loc.reset()
+    first = loc.locate(frames[0])["latency_s"]
+
+    lat = []
+    for i in range(args.bench):
+        loc.reset()
+        lat.append(loc.locate(frames[i % len(frames)])["latency_s"])
+    lat = np.array(lat)
+
+    print(f"{len(loc.desc)} reference frames, {loc.size}x{loc.size} input, "
+          f"torch {torch.__version__}, {torch.get_num_threads()} threads")
+    print(f"first call  {first:.3f} s  (includes one-off setup)")
+    print(f"median      {np.median(lat):.3f} s")
+    print(f"p95         {np.percentile(lat, 95):.3f} s   over {len(lat)} frames")
+    print(f"worst       {lat.max():.3f} s")
+    # The promotion criterion in deploy_handoff.md 4.4.
+    print("p95 under 3 s: " + ("yes" if np.percentile(lat, 95) < 3.0 else
+                               "NO -- see deploy_handoff.md 4.3 for options"))
+    return 0
 
 
 # --- ROS 2 node -----------------------------------------------------------
@@ -317,7 +372,20 @@ def main():
                     help="ignore frames for this long after start-up while the "
                          "camera's auto-exposure settles")
     ap.add_argument("--log", default=None, help="CSV to append to")
+    ap.add_argument("--self-test", action="store_true",
+                    help="verify this machine reproduces the database's "
+                         "descriptors, then exit. Needs no ROS and no camera; "
+                         "run it first on a new machine")
+    ap.add_argument("--bench", type=int, nargs="?", const=20, default=0,
+                    metavar="N",
+                    help="time N frames through the full pipeline and exit "
+                         "(default 20). Needs no ROS and no camera")
     args = ap.parse_args()
+
+    if args.self_test:
+        raise SystemExit(run_self_test(args))
+    if args.bench:
+        raise SystemExit(run_bench(args))
 
     rclpy, cls = build_node(args)
     rclpy.init()
