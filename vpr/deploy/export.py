@@ -8,7 +8,8 @@ with nothing that reaches for the network:
                           the Pi needs torch and this file, not torch.hub, not
                           the dinov2 repo, and not an internet connection.
   database.npz            descriptors for all 13,875 frames plus their poses.
-  golden.npz              20 frames with their descriptors, as raw JPEG bytes.
+  golden.npz              20 frames with their descriptors, as raw JPEG
+                          bytes in one buffer plus offsets (never pickled).
   manifest.json           preprocessing constants, checksums, counts.
 
 Two decisions worth explaining.
@@ -133,12 +134,18 @@ def main():
     rng = np.random.default_rng(0)
     rows = np.sort(rng.choice(len(df), N_GOLDEN, replace=False))
     blobs = [Path(p).read_bytes() for p in df.iloc[rows]["path"]]
+    # One concatenated uint8 buffer plus offsets, not an object array. An
+    # object array can only be serialised by pickling, and a pickle written by
+    # numpy 2.x names its internals numpy._core, which the numpy 1.x that ROS
+    # Humble's rclpy is built against cannot resolve. The Pi cannot upgrade
+    # numpy without breaking rclpy, so the bundle must not depend on pickle.
+    offsets = np.cumsum([0] + [len(b) for b in blobs]).astype(np.int64)
     np.savez_compressed(
         BUNDLE / "golden.npz",
-        images=np.array(blobs, dtype=object),
+        images_blob=np.frombuffer(b"".join(blobs), dtype=np.uint8),
+        images_offsets=offsets,
         descriptors=feats[rows],
         names=df.iloc[rows]["filename"].to_numpy().astype("U16"),
-        allow_pickle=True,
     )
 
     sha = hashlib.sha256(traced_path.read_bytes()).hexdigest()[:16]

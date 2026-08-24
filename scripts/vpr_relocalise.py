@@ -48,6 +48,13 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
+def golden_images(g) -> list[bytes]:
+    """The golden JPEGs, stored as one buffer plus offsets so that loading them
+    never needs pickle -- see export.py for why that matters on the Pi."""
+    blob, off = g["images_blob"], g["images_offsets"]
+    return [blob[off[i]:off[i + 1]].tobytes() for i in range(len(off) - 1)]
+
+
 class Relocaliser:
     """Frame in, pose out. No ROS, no camera, no network."""
 
@@ -152,9 +159,16 @@ class Relocaliser:
         fails, nothing downstream is worth looking at.
         """
         tol = tol or self.manifest["golden"]["tolerance"]
-        g = np.load(self.bundle / "golden.npz", allow_pickle=True)
+        # allow_pickle=False on purpose: the Pi runs the numpy 1.x that ROS
+        # Humble's rclpy needs, and it cannot read a pickle written by the
+        # numpy 2.x on the machine that builds the bundle.
+        g = np.load(self.bundle / "golden.npz", allow_pickle=False)
+        if "images_blob" not in g:
+            raise SystemExit(
+                "golden.npz is in the old pickled format; rebuild the bundle "
+                "with vpr/deploy/export.py and copy golden.npz across again.")
         got = np.stack([self.embed(np.array(Image.open(io.BytesIO(b)).convert("RGB")))
-                        for b in g["images"]])
+                        for b in golden_images(g)])
         cos = (got * g["descriptors"]).sum(1)
         return bool(cos.min() >= tol), float(cos.min())
 
@@ -181,9 +195,9 @@ def run_bench(args) -> int:
     """Time locate() on the golden frames -- the same work the node does per
     frame, embedding plus the retrieval matmul."""
     loc = Relocaliser(args.bundle, gate=args.gate)
-    g = np.load(Path(args.bundle) / "golden.npz", allow_pickle=True)
+    g = np.load(Path(args.bundle) / "golden.npz", allow_pickle=False)
     frames = [np.array(Image.open(io.BytesIO(b)).convert("RGB"))
-              for b in g["images"]]
+              for b in golden_images(g)]
 
     # The first inference pays for lazy TorchScript setup and is not
     # representative of the steady state, so it is reported, not averaged in.
