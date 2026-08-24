@@ -58,7 +58,8 @@ def golden_images(g) -> list[bytes]:
 class Relocaliser:
     """Frame in, pose out. No ROS, no camera, no network."""
 
-    def __init__(self, bundle: Path, gate: float | None = None):
+    def __init__(self, bundle: Path, gate: float | None = None,
+                 seq_tau: float | None = None):
         bundle = Path(bundle)
         self.manifest = json.loads((bundle / "manifest.json").read_text())
         pre = self.manifest["preprocessing"]
@@ -72,6 +73,12 @@ class Relocaliser:
         self.seq_n = r["sequence_n"]
         self.seq_tau = r["sequence_base_m"] + r["frame_spacing_m"] * r["sequence_n"]
         self.gate = r["gate_spread_m"] if gate is None else gate
+        if seq_tau is not None:
+            # The manifest value assumes successive samples are one database
+            # frame apart (0.2 m). The live node samples on a timer instead, so
+            # a driving rover covers far more than that between frames and the
+            # filter reads real motion as a bad match.
+            self.seq_tau = seq_tau
 
         self.net = torch.jit.load(bundle / "vpr_encoder_traced.pt")
         self.net.eval()
@@ -115,7 +122,8 @@ class Relocaliser:
         # every 0.2 m.
         w = np.exp((s - s[0]) / self.temp)
         w /= w.sum()
-        pos = (nb * w[:, None]).sum(0)
+        raw = (nb * w[:, None]).sum(0)
+        pos = raw
 
         # Spread: do the neighbours agree with each other? This is the gate.
         spread = float(np.hypot(*(nb - nb.mean(0)).T).mean())
@@ -127,10 +135,17 @@ class Relocaliser:
             m = np.median(np.array(self.history[-self.seq_n:]), axis=0)
             if math.hypot(*(pos - m)) > self.seq_tau:
                 pos, overridden = m, True
-        self.history.append(np.asarray((nb * w[:, None]).sum(0)))
+        # History always holds the unfiltered estimate, never the median it was
+        # replaced with, so one override cannot drag the filter along with it.
+        self.history.append(raw)
 
         return {
             "x": float(pos[0]), "y": float(pos[1]),
+            # What retrieval actually said, before the sequence filter had a
+            # say. x/y are what the node would act on; raw_x/raw_y are what the
+            # model is judged on, and they must be logged separately or an
+            # override silently overwrites the measurement being collected.
+            "raw_x": float(raw[0]), "raw_y": float(raw[1]),
             # Yaw comes from the top-1 frame, never averaged: two frames at the
             # same spot facing opposite ways would average to a heading the
             # rover never had.
@@ -180,7 +195,7 @@ class Relocaliser:
 # slow is one frame.
 
 def run_self_test(args) -> int:
-    loc = Relocaliser(args.bundle, gate=args.gate)
+    loc = Relocaliser(args.bundle, gate=args.gate, seq_tau=args.seq_tau)
     ok, worst = loc.self_test()
     print(f"self-test {'PASSED' if ok else 'FAILED'} (worst cosine {worst:.6f}, "
           f"tolerance {loc.manifest['golden']['tolerance']})")
@@ -194,7 +209,7 @@ def run_self_test(args) -> int:
 def run_bench(args) -> int:
     """Time locate() on the golden frames -- the same work the node does per
     frame, embedding plus the retrieval matmul."""
-    loc = Relocaliser(args.bundle, gate=args.gate)
+    loc = Relocaliser(args.bundle, gate=args.gate, seq_tau=args.seq_tau)
     g = np.load(Path(args.bundle) / "golden.npz", allow_pickle=False)
     frames = [np.array(Image.open(io.BytesIO(b)).convert("RGB"))
               for b in golden_images(g)]
@@ -242,7 +257,8 @@ def build_node(args):
     class VprRelocalise(Node):
         def __init__(self):
             super().__init__("vpr_relocalise")
-            self.loc = Relocaliser(args.bundle, gate=args.gate)
+            self.loc = Relocaliser(args.bundle, gate=args.gate,
+                                   seq_tau=args.seq_tau)
             ok, worst = self.loc.self_test()
             self.get_logger().info(
                 f"self-test {'PASSED' if ok else 'FAILED'} (worst cosine {worst:.6f})")
@@ -271,7 +287,7 @@ def build_node(args):
                         "stamp", "x", "y", "yaw", "room", "similarity",
                         "spread", "overridden", "accept", "latency_s",
                         "cart_x", "cart_y", "cart_yaw", "disagreement_m",
-                        "cpu_temp_c"])
+                        "cpu_temp_c", "raw_x", "raw_y", "raw_disagreement_m"])
 
             self.pub = self.create_publisher(
                 PoseWithCovarianceStamped, "/initialpose", 10)
@@ -315,9 +331,11 @@ def build_node(args):
                 arr = arr[:, :, ::-1]
 
             r = self.loc.locate(np.ascontiguousarray(arr))
-            dis = float("nan")
+            dis = raw_dis = float("nan")
             if self.cart is not None:
                 dis = math.hypot(r["x"] - self.cart[0], r["y"] - self.cart[1])
+                raw_dis = math.hypot(r["raw_x"] - self.cart[0],
+                                     r["raw_y"] - self.cart[1])
 
             self.get_logger().info(
                 f"{'ACCEPT' if r['accept'] else 'reject'} "
@@ -334,7 +352,8 @@ def build_node(args):
                     r["room"], f"{r['similarity']:.4f}", f"{r['spread']:.4f}",
                     int(r["overridden"]), int(r["accept"]),
                     f"{r['latency_s']:.3f}", f"{c[0]:.4f}", f"{c[1]:.4f}",
-                    f"{c[2]:.4f}", f"{dis:.4f}", f"{cpu_temp():.1f}"])
+                    f"{c[2]:.4f}", f"{dis:.4f}", f"{cpu_temp():.1f}",
+                    f"{r['raw_x']:.4f}", f"{r['raw_y']:.4f}", f"{raw_dis:.4f}"])
                 self.fh.flush()
 
             if not r["accept"]:
@@ -385,6 +404,10 @@ def main():
     ap.add_argument("--settle", type=float, default=2.0,
                     help="ignore frames for this long after start-up while the "
                          "camera's auto-exposure settles")
+    ap.add_argument("--seq-tau", type=float, default=None,
+                    help="sequence-filter threshold in metres (default from "
+                         "the manifest, which assumes 0.2 m between samples -- "
+                         "raise it when sampling a moving rover on a timer)")
     ap.add_argument("--log", default=None, help="CSV to append to")
     ap.add_argument("--self-test", action="store_true",
                     help="verify this machine reproduces the database's "
