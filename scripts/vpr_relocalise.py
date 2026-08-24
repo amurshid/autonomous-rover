@@ -59,7 +59,7 @@ class Relocaliser:
     """Frame in, pose out. No ROS, no camera, no network."""
 
     def __init__(self, bundle: Path, gate: float | None = None,
-                 seq_tau: float | None = None):
+                 seq_tau: float | None = None, sim_floor: float = 0.0):
         bundle = Path(bundle)
         self.manifest = json.loads((bundle / "manifest.json").read_text())
         pre = self.manifest["preprocessing"]
@@ -73,6 +73,17 @@ class Relocaliser:
         self.seq_n = r["sequence_n"]
         self.seq_tau = r["sequence_base_m"] + r["frame_spacing_m"] * r["sequence_n"]
         self.gate = r["gate_spread_m"] if gate is None else gate
+        # Spread asks whether the top-5 agree with each other; similarity asks
+        # whether any of them actually looks like the query. They come apart
+        # exactly where the database has no coverage: the neighbours cluster
+        # tightly at the edge of the recorded envelope, so spread is small and
+        # the gate passes a pose that is simply the nearest place anyone drove.
+        # Retrieval can only ever return a weighted mean of recorded poses, so
+        # off-map queries cannot be answered -- only detected, and low
+        # similarity is what detects them. Measured on 2026-08-24: a 0.75 floor
+        # took day2_evening_700 from 1.83% of accepted fixes beyond 2 m (max
+        # 4.39 m) to 0.00% (max 1.86 m), costing 12% of accepted frames.
+        self.sim_floor = sim_floor
         if seq_tau is not None:
             # The manifest value assumes successive samples are one database
             # frame apart (0.2 m). The live node samples on a timer instead, so
@@ -156,7 +167,8 @@ class Relocaliser:
             "overridden": overridden,
             # An overridden frame's yaw came from the match just rejected, so
             # the pose is internally inconsistent and must not be trusted.
-            "accept": bool(spread <= self.gate and not overridden),
+            "accept": bool(spread <= self.gate and not overridden
+                           and s[0] >= self.sim_floor),
             "latency_s": time.time() - t0,
         }
 
@@ -195,7 +207,8 @@ class Relocaliser:
 # slow is one frame.
 
 def run_self_test(args) -> int:
-    loc = Relocaliser(args.bundle, gate=args.gate, seq_tau=args.seq_tau)
+    loc = Relocaliser(args.bundle, gate=args.gate, seq_tau=args.seq_tau,
+                      sim_floor=args.sim_floor)
     ok, worst = loc.self_test()
     print(f"self-test {'PASSED' if ok else 'FAILED'} (worst cosine {worst:.6f}, "
           f"tolerance {loc.manifest['golden']['tolerance']})")
@@ -209,7 +222,8 @@ def run_self_test(args) -> int:
 def run_bench(args) -> int:
     """Time locate() on the golden frames -- the same work the node does per
     frame, embedding plus the retrieval matmul."""
-    loc = Relocaliser(args.bundle, gate=args.gate, seq_tau=args.seq_tau)
+    loc = Relocaliser(args.bundle, gate=args.gate, seq_tau=args.seq_tau,
+                      sim_floor=args.sim_floor)
     g = np.load(Path(args.bundle) / "golden.npz", allow_pickle=False)
     frames = [np.array(Image.open(io.BytesIO(b)).convert("RGB"))
               for b in golden_images(g)]
@@ -258,7 +272,8 @@ def build_node(args):
         def __init__(self):
             super().__init__("vpr_relocalise")
             self.loc = Relocaliser(args.bundle, gate=args.gate,
-                                   seq_tau=args.seq_tau)
+                                   seq_tau=args.seq_tau,
+                                   sim_floor=args.sim_floor)
             ok, worst = self.loc.self_test()
             self.get_logger().info(
                 f"self-test {'PASSED' if ok else 'FAILED'} (worst cosine {worst:.6f})")
@@ -272,6 +287,7 @@ def build_node(args):
             self.publish = args.publish
             self.period = args.period
             self.settle = args.settle
+            self.timeout = args.timeout
             self.started = time.time()
             self.last = 0.0
             self.cart = None
@@ -309,6 +325,17 @@ def build_node(args):
 
         def on_image(self, msg):
             now = time.time()
+            # A gate that can decline every frame -- which is the point of
+            # --sim-floor -- can also decline all of them, and this node sits
+            # in the boot path. Give up rather than hang start_localization.sh
+            # forever; a non-zero exit lets the caller fall back to the
+            # hardcoded pose.
+            if self.timeout and now - self.started > self.timeout:
+                self.get_logger().error(
+                    f"no confirmed fix in {self.timeout:.0f}s "
+                    f"({len(self.accepted)} accepted, none confirmed) -- "
+                    f"giving up so the caller can fall back")
+                raise SystemExit(2)
             # The camera's auto-exposure has not settled in the first second
             # after start-up, and cold start is exactly when those frames
             # arrive. The database contains no frames that look like that.
@@ -404,10 +431,21 @@ def main():
     ap.add_argument("--settle", type=float, default=2.0,
                     help="ignore frames for this long after start-up while the "
                          "camera's auto-exposure settles")
+    ap.add_argument("--sim-floor", type=float, default=0.0,
+                    help="reject a frame whose best match scores below this "
+                         "cosine (default 0.0 = off). Detects the rover being "
+                         "somewhere the database does not cover, which the "
+                         "spread gate cannot see. 0.75 is the measured value; "
+                         "prove it does not starve in shadow mode first")
     ap.add_argument("--seq-tau", type=float, default=None,
                     help="sequence-filter threshold in metres (default from "
                          "the manifest, which assumes 0.2 m between samples -- "
                          "raise it when sampling a moving rover on a timer)")
+    ap.add_argument("--timeout", type=float, default=0.0,
+                    help="exit non-zero if no fix is confirmed within this "
+                         "many seconds (default 0 = wait forever). Set it "
+                         "whenever --publish runs in a boot script, so a "
+                         "starving gate cannot hang the launch")
     ap.add_argument("--log", default=None, help="CSV to append to")
     ap.add_argument("--self-test", action="store_true",
                     help="verify this machine reproduces the database's "
@@ -433,7 +471,10 @@ def main():
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy's signal handler may already have shut the context down, and
+        # calling it twice raises RCLError over an otherwise clean Ctrl-C.
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
