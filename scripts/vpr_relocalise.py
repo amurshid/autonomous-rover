@@ -325,11 +325,15 @@ def build_node(args):
 
         def on_image(self, msg):
             now = time.time()
+            if self.done:
+                return
             # A gate that can decline every frame -- which is the point of
             # --sim-floor -- can also decline all of them, and this node sits
             # in the boot path. Give up rather than hang start_localization.sh
             # forever; a non-zero exit lets the caller fall back to the
-            # hardcoded pose.
+            # hardcoded pose. Checked only while unfinished: timing out after a
+            # successful publish would report success as failure, and the
+            # caller would overwrite a good pose with the hardcoded one.
             if self.timeout and now - self.started > self.timeout:
                 self.get_logger().error(
                     f"no confirmed fix in {self.timeout:.0f}s "
@@ -340,8 +344,6 @@ def build_node(args):
             # after start-up, and cold start is exactly when those frames
             # arrive. The database contains no frames that look like that.
             if now - self.started < self.settle or now - self.last < self.period:
-                return
-            if self.done:
                 return
             self.last = now
 
@@ -414,6 +416,11 @@ def build_node(args):
                 f"PUBLISHED x={b['x']:.2f} y={b['y']:.2f} "
                 f"yaw={math.degrees(b['yaw']):.0f} deg -- done")
             self.done = True
+            # Exit on success rather than spinning on. The caller reads the
+            # exit code to decide whether to fall back to the hardcoded pose,
+            # so lingering here let --timeout fire *after* a good publish and
+            # report success as failure.
+            raise SystemExit(0)
 
     return rclpy, VprRelocalise
 
@@ -465,16 +472,20 @@ def main():
     rclpy, cls = build_node(args)
     rclpy.init()
     node = cls()
+    code = 0
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+    except SystemExit as e:
+        code = e.code or 0
     finally:
         node.destroy_node()
         # rclpy's signal handler may already have shut the context down, and
         # calling it twice raises RCLError over an otherwise clean Ctrl-C.
         if rclpy.ok():
             rclpy.shutdown()
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":

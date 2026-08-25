@@ -44,3 +44,8 @@ Thumbs.db
 # Personal logs
 vpr_ml_handoff.md
 deploy_handoff.md
+
+# Shadow logs
+vpr_relocalise_log.txt
+vpr_relocalise_log2.txt
+vpr_relocalise_log3.txt
