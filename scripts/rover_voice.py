@@ -90,9 +90,10 @@ class Voice:
                     p = subprocess.run(["aplay", "-q", "-D", SPK, "-"],
                                        input=wav, stderr=subprocess.PIPE)
                     if p.returncode != 0:
+                self._flush_mic()       # drain the pipe BEFORE going live
                         print(f"[aplay failed on {SPK}: "
                               f"{p.stderr.decode(errors='replace').strip()}]")
-                    time.sleep(0.15)        # let the tail decay before listening
+                    time.sleep(0.4)         # let the tail decay before listening
             except FileNotFoundError as e:
                 print(f"[tts missing: {e}]")
             except Exception as e:
@@ -125,6 +126,31 @@ class Voice:
         return p.stdout
 
     @staticmethod
+    def _flush_mic(self):
+        """Discard audio recorded while speaking.
+
+        arecord keeps writing into the pipe during playback, so bytes read
+        just after _deaf clears are seconds old -- the rover's own voice.
+        """
+        p = self._proc
+        if p is None or p.poll() is not None:
+            return
+        fd = p.stdout.fileno()
+        os.set_blocking(fd, False)
+        n = 0
+        try:
+            while True:
+                c = p.stdout.read(65536)
+                if not c:
+                    break
+                n += len(c)
+        except (BlockingIOError, OSError):
+            pass
+        finally:
+            os.set_blocking(fd, True)
+            if n:
+                print(f"[flushed {n/2/16000:.1f}s of mic audio]")
+
     def _chunk(text, limit=190):
         """Split into <=limit pieces on sentence boundaries. Orpheus caps at 200."""
         parts, cur = [], ""
