@@ -11,7 +11,7 @@ essentially free CPU-wise.
 
 Devices default to the cards recorded in the project notes:
   mic     card 1 (USB PnP, TI PCM2902)
-  speaker card 2 (UACDemoV1.0, stereo -> plughw handles the mono conversion)
+  speaker card 0 (analog 3.5 mm jack; built-in, cannot renumber)
 
 Env overrides: ROVER_MIC, ROVER_SPK, ROVER_TTS (espeak|piper),
 ROVER_PIPER_MODEL, ROVER_STT_MODEL.
@@ -28,26 +28,15 @@ import time
 import wave
 
 MIC = os.environ.get("ROVER_MIC", "plughw:1,0")
-SPK = os.environ.get("ROVER_SPK", "plughw:2,0")
+SPK = os.environ.get("ROVER_SPK", "plughw:0,0")
 TTS_ENGINE = os.environ.get("ROVER_TTS", "espeak")
 PIPER_MODEL = os.environ.get("ROVER_PIPER_MODEL", "")
 ESPEAK_VOICE = os.environ.get("ROVER_VOICE", "")      # empty = espeak's default
 ESPEAK_SPEED = os.environ.get("ROVER_SPEED", "150")
-ORPHEUS_MODEL = os.environ.get("ROVER_ORPHEUS_MODEL", "canopylabs/orpheus-v1-english")
-ORPHEUS_VOICE = os.environ.get("ROVER_ORPHEUS_VOICE", "hannah")
-
-
-def _concat_wav(a, b):
-    """Join two WAV blobs. Orpheus caps input at 200 chars, so long replies
-    come back as several files that must be stitched before playback."""
-    out = io.BytesIO()
-    with wave.open(io.BytesIO(a)) as wa, wave.open(io.BytesIO(b)) as wb:
-        with wave.open(out, "wb") as w:
-            w.setparams(wa.getparams())
-            w.writeframes(wa.readframes(wa.getnframes()))
-            w.writeframes(wb.readframes(wb.getnframes()))
-    return out.getvalue()
 STT_MODEL = os.environ.get("ROVER_STT_MODEL", "whisper-large-v3-turbo")
+ORPHEUS_MODEL = os.environ.get("ROVER_ORPHEUS_MODEL",
+                               "canopylabs/orpheus-v1-english")
+ORPHEUS_VOICE = os.environ.get("ROVER_ORPHEUS_VOICE", "hannah")
 
 RATE = 16000          # what Whisper wants; plughw resamples from the card
 CHUNK = 512           # samples -> 32 ms per chunk
@@ -71,6 +60,9 @@ class Voice:
     def say(self, text, block=False):
         """Queue text for speech. Thread-safe; safe to call from ROS callbacks."""
         text = (text or "").strip()
+        # Orpheus reads run-together punctuation literally ("now.Done" ->
+        # "now dot Done"). Space out sentence boundaries before synthesis.
+        text = re.sub(r'([.!?])([A-Za-z])', r'\1 \2', text)
         if not text:
             return
         done = threading.Event() if block else None
@@ -90,7 +82,6 @@ class Voice:
                     p = subprocess.run(["aplay", "-q", "-D", SPK, "-"],
                                        input=wav, stderr=subprocess.PIPE)
                     if p.returncode != 0:
-                self._flush_mic()       # drain the pipe BEFORE going live
                         print(f"[aplay failed on {SPK}: "
                               f"{p.stderr.decode(errors='replace').strip()}]")
                     time.sleep(0.4)         # let the tail decay before listening
@@ -99,13 +90,21 @@ class Voice:
             except Exception as e:
                 print(f"[tts error: {e}]")
             finally:
+                self._flush_mic()       # drain the pipe BEFORE going live
                 self._deaf.clear()
                 if done:
                     done.set()
 
     def _synth(self, text):
         if TTS_ENGINE == "orpheus":
-            return self._synth_orpheus(text)
+            try:
+                r = self.client.audio.speech.create(
+                    model=ORPHEUS_MODEL, voice=ORPHEUS_VOICE,
+                    input=text, response_format="wav")
+                return r.read()
+            except Exception as e:
+                print(f"[orpheus failed, falling back to espeak: {e}]")
+                # fall through to espeak below
         if TTS_ENGINE == "piper" and PIPER_MODEL:
             cmd = ["piper", "--model", PIPER_MODEL, "--output_file", "-"]
             p = subprocess.run(cmd, input=text.encode(), capture_output=True)
@@ -125,7 +124,8 @@ class Voice:
                   + (f' -- "{err[:200]}"' if err else "") + "]")
         return p.stdout
 
-    @staticmethod
+    # ------------------------------------------------------------ listening
+
     def _flush_mic(self):
         """Discard audio recorded while speaking.
 
@@ -151,53 +151,12 @@ class Voice:
             if n:
                 print(f"[flushed {n/2/16000:.1f}s of mic audio]")
 
-    def _chunk(text, limit=190):
-        """Split into <=limit pieces on sentence boundaries. Orpheus caps at 200."""
-        parts, cur = [], ""
-        for piece in re.split(r"(?<=[.!?])\s+", text.strip()):
-            while len(piece) > limit:                 # pathological single sentence
-                cut = piece.rfind(" ", 0, limit)
-                cut = cut if cut > 0 else limit
-                parts.append(piece[:cut])
-                piece = piece[cut:].lstrip()
-            if len(cur) + len(piece) + 1 <= limit:
-                cur = f"{cur} {piece}".strip()
-            else:
-                if cur:
-                    parts.append(cur)
-                cur = piece
-        if cur:
-            parts.append(cur)
-        return parts or [text[:limit]]
-
-    def _synth_orpheus(self, text):
-        """Neural TTS on Groq's hardware -- no CPU or heat cost on the Pi."""
-        out = b""
-        for chunk in self._chunk(text):
-            try:
-                r = self.client.audio.speech.create(
-                    model=ORPHEUS_MODEL, voice=ORPHEUS_VOICE,
-                    input=chunk, response_format="wav")
-                wav = r.read() if hasattr(r, "read") else r.content
-            except Exception as e:
-                print(f"[orpheus error: {e}]")
-                print("[falling back to espeak for this line]")
-                p = subprocess.run(
-                    ["espeak-ng", "-s", ESPEAK_SPEED, "--stdout", text],
-                    capture_output=True)
-                return p.stdout
-            out = wav if not out else _concat_wav(out, wav)
-        return out
-
-    # ------------------------------------------------------------ listening
-
     def _stream(self):
         if self._proc is None or self._proc.poll() is not None:
             self._proc = subprocess.Popen(
                 ["arecord", "-D", MIC, "-q", "-f", "S16_LE",
                  "-r", str(RATE), "-c", "1", "-t", "raw"],
                 stdout=subprocess.PIPE)
-        onset = 0
         return self._proc
 
     def calibrate(self, seconds=1.5, skip=0.4, multiplier=3.0):
@@ -238,6 +197,7 @@ class Voice:
         """Block until an utterance is captured. Returns raw PCM bytes, or None."""
         s = self._stream()
         pre, frames = [], []
+        onset = 0
         speaking = False
         quiet = 0
         quiet_limit = int(silence_ms / 1000 * RATE / CHUNK)
@@ -331,10 +291,8 @@ def main():
     """Standalone check: python3 rover_voice.py"""
     from groq import Groq
     v = Voice(Groq(api_key=os.environ["GROQ_API_KEY"]))
-    # Calibrate first: powered speakers hiss, and measuring after playback
-    # bakes the amplifier's noise floor into the threshold.
+    v.say("Microphone test. Say something after the beep.", block=True)
     v.calibrate()
-    v.say("Microphone test. Say something now.", block=True)
     print("listening...")
     text = v.listen_once()
     print(f"transcript: {text!r}")
