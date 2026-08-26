@@ -1,0 +1,17 @@
+[Unit]
+Description=Nav2 navigation stack
+After=rover-relocalise.service
+Requires=rover-cartographer.service rover-bridge.service
+
+[Service]
+Type=simple
+User=amurshid
+WorkingDirectory=/home/amurshid
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec ros2 launch /home/amurshid/nav2.launch.py'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=rover.target

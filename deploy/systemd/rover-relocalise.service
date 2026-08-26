@@ -1,0 +1,30 @@
+[Unit]
+Description=Work out where the rover is, from one camera frame
+After=rover-initialpose.service rover-camera.service
+Requires=rover-initialpose.service rover-camera.service
+# Nav2 waits on this: a planner started before the robot knows where it is
+# will plan from the wrong place.
+Before=rover-nav2.service
+
+[Service]
+# oneshot: it publishes one pose and exits. RemainAfterExit lets Nav2's
+# After= mean "after this has finished", not "after it has started".
+Type=oneshot
+RemainAfterExit=yes
+User=amurshid
+WorkingDirectory=/home/amurshid
+# Two threads measured as fast as four -- inference is memory-bandwidth bound,
+# not compute bound -- while leaving two cores for ROS and the teleop.
+Environment=OMP_NUM_THREADS=2
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec /home/amurshid/vpr-venv/bin/python /home/amurshid/vpr_relocalise.py \
+        --bundle /home/amurshid/bundle \
+        --publish --timeout 60 --sim-floor 0.75 --period 1.5'
+# Exit 2 = no confirmed fix, exit 3 = no bridge. Neither should stop the boot:
+# Cartographer still runs, and its own global localization may recover.
+SuccessExitStatus=2 3
+TimeoutStartSec=180
+
+[Install]
+WantedBy=rover.target

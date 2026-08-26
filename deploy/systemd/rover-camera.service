@@ -1,0 +1,21 @@
+[Unit]
+Description=Pi camera (/camera/image_raw)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=amurshid
+WorkingDirectory=/home/amurshid
+# format:=RGB888 is correct despite the topic reporting bgr8 -- libcamera's
+# RGB888 is byte-order BGR in memory, which is what vpr_relocalise.py flips.
+# The database was recorded through this exact pipeline. Do not "fix" it.
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec ros2 run camera_ros camera_node --ros-args \
+        -p camera:=0 -p width:=320 -p height:=240 -p format:=RGB888'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=rover.target

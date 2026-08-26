@@ -1,0 +1,17 @@
+[Unit]
+Description=Wave Rover ESP32 serial bridge (/cmd_vel -> motors)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=amurshid
+WorkingDirectory=/home/amurshid
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec python3 /home/amurshid/wave_rover_bridge.py'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=rover.target
