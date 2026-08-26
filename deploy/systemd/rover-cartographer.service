@@ -5,6 +5,10 @@ Description=Cartographer pure localization against house.pbstream
 After=rover-lidar.service
 Requires=rover-lidar.service
 
+# WantedBy only starts; PartOf is what makes "systemctl stop
+# rover.target" stop this too.
+PartOf=rover.target
+
 [Service]
 Type=simple
 User=amurshid

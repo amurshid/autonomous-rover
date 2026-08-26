@@ -3,6 +3,10 @@ Description=Wave Rover ESP32 serial bridge (/cmd_vel -> motors)
 After=network-online.target
 Wants=network-online.target
 
+# WantedBy only starts; PartOf is what makes "systemctl stop
+# rover.target" stop this too.
+PartOf=rover.target
+
 [Service]
 Type=simple
 User=amurshid

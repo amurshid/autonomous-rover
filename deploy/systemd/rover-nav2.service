@@ -3,6 +3,12 @@ Description=Nav2 navigation stack
 After=rover-relocalise.service
 Requires=rover-cartographer.service rover-bridge.service
 
+# WantedBy only starts; PartOf is what makes "systemctl stop
+# rover.target" stop this too. A Cartographer restart also brings
+# this down and back, because Cartographer returns on a default
+# pose and everything downstream is then working from a stale one.
+PartOf=rover.target rover-cartographer.service
+
 [Service]
 Type=simple
 User=amurshid
