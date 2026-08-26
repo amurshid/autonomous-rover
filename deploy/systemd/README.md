@@ -72,6 +72,23 @@ rather than a robot that will not boot:
 
 Enable at boot only once that has worked twice.
 
+## Voice, not the text REPL
+
+`rover_ai.py` defaults to its text REPL — `use_text = args.text or not
+args.voice` — which reads stdin. A systemd service has no stdin, so the unit
+passes `--voice` explicitly. It also needs `SupplementaryGroups=audio`: a login
+shell grants access to `arecord` and `aplay`, a service does not inherit it.
+
+Two things to check on the rover, since they only bite at boot:
+
+- **Card numbering.** `rover_voice.py` defaults to `plughw:1,0` for the mic and
+  `plughw:0,0` for the speaker. The speaker is the built-in analog jack and
+  cannot renumber; the USB mic can, if anything else audio-capable is plugged
+  in first. `arecord -l` after a cold boot confirms it.
+- **The mic exists at all.** Voice mode is the only interface once there is no
+  keyboard attached, so if `arecord` fails the rover boots deaf and there is
+  nothing to notice it — `journalctl -u rover-ai -b` is where that shows up.
+
 ## The API key
 
 `rover_ai.py` exits immediately without `GROQ_API_KEY`, and systemd gives a
