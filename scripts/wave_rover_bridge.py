@@ -4,6 +4,7 @@ import math
 import threading
 import serial
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
@@ -150,11 +151,17 @@ def main():
     node = WaveRoverBridge()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy's SIGTERM handler has already shut the context down by
+        # the time we get here, and calling it twice raises RCLError --
+        # which exits 1 and makes systemd record a normal stop as a
+        # failure.
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 
 if __name__ == '__main__':
