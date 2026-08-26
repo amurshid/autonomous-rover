@@ -3,6 +3,10 @@ Description=LDROBOT D500 lidar (/scan)
 After=network-online.target
 Wants=network-online.target
 
+# WantedBy only starts; PartOf is what makes "systemctl stop
+# rover.target" stop this too.
+PartOf=rover.target
+
 [Service]
 Type=simple
 User=amurshid

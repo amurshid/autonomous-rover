@@ -3,6 +3,10 @@ Description=Natural-language command interface for the rover
 After=rover-nav2.service
 Requires=rover-nav2.service
 
+# WantedBy only starts; PartOf is what makes "systemctl stop
+# rover.target" stop this too.
+PartOf=rover.target
+
 [Service]
 Type=simple
 User=amurshid

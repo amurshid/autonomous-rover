@@ -50,6 +50,29 @@ boots unlocalised is recoverable; a boot that halts partway is not.
     sudo systemctl enable rover-bridge rover-lidar rover-camera \
          rover-cartographer rover-initialpose rover-relocalise rover-nav2 rover-ai
 
+## When something fails
+
+Long-running units restart themselves: the drivers (`bridge`, `lidar`,
+`camera`) with `Restart=always`, the rest with `Restart=on-failure`.
+
+The case worth understanding is **Cartographer restarting**. It comes back on a
+default pose, having lost the one it was relocalised to, so `initialpose`,
+`relocalise` and `nav2` are all `PartOf=rover-cartographer.service` and go down
+and back with it. That re-runs the camera relocalisation rather than leaving
+Nav2 to plan from a pose that no longer means anything.
+
+`relocalise` itself is never restarted: it is a oneshot that succeeded, and
+re-publishing a pose mid-navigation would restart Cartographer's trajectory
+underneath the planner.
+
+To re-run the whole sequence by hand:
+
+    sudo systemctl restart rover.target
+
+`PartOf=rover.target` on every unit is what makes that work -- `WantedBy=`
+starts units but never stops them, so without it the command silently does
+nothing.
+
 ## Operating it
 
     systemctl status 'rover-*'          # what is up

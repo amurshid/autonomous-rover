@@ -6,6 +6,12 @@ Requires=rover-initialpose.service rover-camera.service
 # will plan from the wrong place.
 Before=rover-nav2.service
 
+# WantedBy only starts; PartOf is what makes "systemctl stop
+# rover.target" stop this too. A Cartographer restart also brings
+# this down and back, because Cartographer returns on a default
+# pose and everything downstream is then working from a stale one.
+PartOf=rover.target rover-cartographer.service
+
 [Service]
 # oneshot: it publishes one pose and exits. RemainAfterExit lets Nav2's
 # After= mean "after this has finished", not "after it has started".
