@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import math
@@ -177,6 +178,39 @@ class Relocaliser:
 
     # --- proving the pipeline matches the machine that built the database --
 
+    def _fingerprint(self) -> str:
+        """What the self-test's result depends on. If none of this changed,
+        neither can the answer."""
+        h = hashlib.sha256()
+        h.update(self.manifest["model"]["sha256_16"].encode())
+        h.update(torch.__version__.encode())
+        h.update(np.__version__.encode())
+        # Preprocessing lives in this file, so a change to it must re-verify.
+        h.update(Path(__file__).read_bytes())
+        return h.hexdigest()[:32]
+
+    def self_test_cached(self) -> tuple[bool, float, bool]:
+        """self_test(), skipped when nothing that could change its answer has.
+
+        Embedding 20 golden frames costs ~25 s on the Pi's two threads, every
+        boot, in the boot path -- and it can only fail if the bundle, torch,
+        numpy or this file changed. Returns (ok, worst, ran).
+        """
+        stamp = Path(self.bundle) / ".self_test_ok"
+        fp = self._fingerprint()
+        try:
+            if stamp.read_text().strip() == fp:
+                return True, float("nan"), False
+        except OSError:
+            pass
+        ok, worst = self.self_test()
+        if ok:
+            try:
+                stamp.write_text(fp + "\n")
+            except OSError:
+                pass          # read-only bundle: just re-verify next boot
+        return ok, worst, True
+
     def self_test(self, tol: float | None = None) -> tuple[bool, float]:
         """Re-embed frames whose descriptors are known and compare.
 
@@ -274,9 +308,11 @@ def build_node(args):
             self.loc = Relocaliser(args.bundle, gate=args.gate,
                                    seq_tau=args.seq_tau,
                                    sim_floor=args.sim_floor)
-            ok, worst = self.loc.self_test()
+            ok, worst, ran = self.loc.self_test_cached()
             self.get_logger().info(
-                f"self-test {'PASSED' if ok else 'FAILED'} (worst cosine {worst:.6f})")
+                f"self-test {'PASSED' if ok else 'FAILED'} "
+                + (f"(worst cosine {worst:.6f})" if ran else
+                   "(cached; bundle, torch and code unchanged)"))
             if not ok:
                 raise SystemExit(
                     "self-test failed: this Pi does not reproduce the "
