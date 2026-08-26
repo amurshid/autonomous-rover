@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -40,11 +41,12 @@ SYSTEM = (
     "go_to_room returns as soon as the robot sets off, not when it arrives; "
     "say that it is on its way, never that it has arrived. "
     "If a request is unclear or unsafe, ask instead of guessing. "
-    "You have no knowledge of current events, weather, news or prices. For "
-    "anything that could have changed since you were trained, call "
-    "ask_the_internet rather than answering from memory. "
-    "Your replies are read aloud, so keep them to one short sentence with no "
-    "lists, no markdown and no emoji."
+    "Use ask_the_internet for anything about current events, news, "
+    "weather, prices, or facts that may have changed recently. If you "
+    "are unsure whether your knowledge is current, call it. "
+    "Your replies are read aloud, so reply with exactly one short sentence. "
+    "Never add a second sentence such as \"Done.\" or \"Let me know if you "
+    "need anything else.\" No lists, no markdown, no emoji."
 )
 
 TOOLS = [
@@ -68,12 +70,12 @@ TOOLS = [
     {"type": "function", "function": {
         "name": "ask_the_internet",
         "description": (
-            "Look up anything the model does not already know: current weather, "
-            "news, sports results, prices, opening times, recent events, or any "
-            "fact that may have changed. Use this instead of guessing."),
+            "Search the web for current information: news, weather, sports, "
+            "prices, recent events, or any fact that may have changed since "
+            "training. Returns a short text answer."),
         "parameters": {"type": "object", "properties": {
             "question": {"type": "string",
-                         "description": "A complete, self-contained question."}},
+                         "description": "A self-contained question."}},
             "required": ["question"]}}},
     {"type": "function", "function": {
         "name": "spin",
@@ -108,41 +110,27 @@ class Brain:
         self.history = [{"role": "system", "content": SYSTEM}]
         self.lock = threading.Lock()
 
+    # -------------------------------------------------------------- retry
+
+    def _complete(self, **kw):
+        """Call Groq, retrying transient failures. Raises on final failure."""
+        last = None
+        for attempt in range(3):
+            try:
+                return self.client.chat.completions.create(**kw)
+            except Exception as e:
+                last = e
+                print(f'[llm attempt {attempt + 1}/3 failed: {e}]')
+                time.sleep(0.6 * (attempt + 1))
+        raise last
+
     # ------------------------------------------------------------ dispatch
-
-    def ask_the_internet(self, question):
-        """Delegate to groq/compound, which has built-in web search.
-
-        Compound cannot be used as the main model: it does not support custom
-        tools, so the rover would lose spin/drive/go_to_room. Calling it as a
-        tool keeps control with gpt-oss and borrows the search.
-        """
-        if not question.strip():
-            return False, 'no question given'
-        try:
-            r = self.client.chat.completions.create(
-                model=SEARCH_MODEL,
-                messages=[
-                    {"role": "system", "content":
-                     "Answer in at most two short sentences, plain spoken "
-                     "English. No markdown, no tables, no lists, no URLs, no "
-                     "citations. Round numbers. If you cannot find out, say so."},
-                    {"role": "user", "content": question}],
-                max_tokens=300)
-            answer = (r.choices[0].message.content or '').strip()
-        except Exception as e:
-            return False, f'search failed: {e}'
-        if not answer:
-            return False, 'no answer found'
-        return True, answer[:600]
 
     def dispatch(self, name, args):
         # Manual motion and Nav2 both publish /cmd_vel. Never let them overlap.
         if name in ('spin', 'drive') and self.nav.is_navigating():
             self.nav.cancel()
 
-        if name == 'ask_the_internet':
-            return self.ask_the_internet(args.get('question', ''))
         if name == 'go_to_room':
             return self.nav.go_to_room(args.get('room', ''))
         if name == 'cancel_navigation':
@@ -157,6 +145,8 @@ class Brain:
             return True, {'x': round(p[0], 2), 'y': round(p[1], 2),
                           'heading_deg': round(p[2], 1),
                           'nearest_room': room, 'metres_away': round(dist, 2)}
+        if name == 'ask_the_internet':
+            return self.search(args.get('question', ''))
         if name == 'spin':
             return self.m.do_spin(args.get('degrees', 0))
         if name == 'drive':
@@ -165,6 +155,29 @@ class Brain:
             self.nav.cancel()
             return self.m.do_stop()
         return False, f'unknown tool {name}'
+
+    # -------------------------------------------------------------- search
+
+    def search(self, question):
+        """Delegate to a Groq Compound model, which has built-in web search.
+
+        Compound cannot do local tool calling, so it cannot be the main model.
+        It is queried here as a plain one-shot question instead.
+        """
+        if not question.strip():
+            return False, 'no question given'
+        try:
+            r = self.client.chat.completions.create(
+                model=SEARCH_MODEL,
+                messages=[
+                    {"role": "system", "content":
+                     "Answer in one or two short sentences. Plain text only, "
+                     "no markdown or lists. It will be read aloud."},
+                    {"role": "user", "content": question}],
+                max_tokens=300)
+            return True, (r.choices[0].message.content or '').strip()
+        except Exception as e:
+            return False, f'search failed: {e}'
 
     # ------------------------------------------------------------- history
 
@@ -187,12 +200,12 @@ class Brain:
         self.history.append({"role": "user", "content": text})
         self._trim()
         try:
-            r = self.client.chat.completions.create(
+            r = self._complete(
                 model=MODEL, messages=self.history,
                 tools=TOOLS, tool_choice="auto", max_tokens=400)
-        except Exception as e:
+        except Exception:
             self.history.pop()
-            return f'[llm error: {e}]'
+            return "Sorry, I could not reach my brain just then. Please try again." 
 
         msg = r.choices[0].message
         self.history.append(msg.model_dump(exclude_none=True))
@@ -212,14 +225,31 @@ class Brain:
                 "role": "tool", "tool_call_id": c.id,
                 "content": json.dumps({"ok": ok, "result": result})})
 
-        try:
-            r2 = self.client.chat.completions.create(
-                model=MODEL, messages=self.history, max_tokens=200)
-            reply = r2.choices[0].message.content or 'done'
-            self.history.append({"role": "assistant", "content": reply})
-            return reply
-        except Exception as e:
-            return f'[done, but reply failed: {e}]'
+        for _ in range(3):          # allow a few chained tool calls
+            try:
+                r2 = self.client.chat.completions.create(
+                    model=MODEL, messages=self.history,
+                    tools=TOOLS, tool_choice="auto", max_tokens=100)
+            except Exception as e:
+                print(f'[reply failed: {e}]')
+                return 'Sorry, something went wrong.'
+            m2 = r2.choices[0].message
+            self.history.append(m2.model_dump(exclude_none=True))
+            more = m2.tool_calls or []
+            if not more:
+                reply = m2.content or 'done'
+                return reply
+            for c in more:
+                try:
+                    a = json.loads(c.function.arguments or '{}')
+                except json.JSONDecodeError:
+                    a = {}
+                print(f'  -> {c.function.name}({a})')
+                ok, result = self.dispatch(c.function.name, a)
+                self.history.append({
+                    "role": "tool", "tool_call_id": c.id,
+                    "content": json.dumps({"ok": ok, "result": result})})
+        return 'Sorry, I got stuck on that one.'
 
 
 def main():
