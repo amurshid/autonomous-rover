@@ -11,7 +11,7 @@ from geometry_msgs.msg import PoseStamped
 
 LOCATIONS = {
     'work_room':       (2.276,  8.183,  -0.8196, 0.5730),
-    'entrance':        (-1.90,  7.90,    0.528,  0.849),
+    'entrance':        (-2.94,  7.20,   -0.582, -0.813),
     'office_room':     (-0.63,  2.85,   -0.861,  0.509),
     'dining_room':     (-5.20,  0.03,   -0.184,  0.983),
     'kitchen':         (-5.84, -4.14,    0.469,  0.883),
@@ -19,7 +19,7 @@ LOCATIONS = {
     'formal_living':   (-10.21, 1.33,    0.964, -0.267),
     'living_room':     (-10.44,-6.37,   -0.711,  0.703),
     'azmayen_room':    (-9.42,  5.99,    0.993, -0.117),
-    'parents_room':    (-12.15,-5.72,    0.972,  0.236),
+    'parents_room':    (-14.37, -4.29,   0.995,  0.096),
 }
 
 
@@ -27,9 +27,11 @@ class Patrol(Node):
     def __init__(self):
         super().__init__('patrol')
         self.declare_parameter('max_failures', 3)
+        self.declare_parameter('retries', 5)
         self.declare_parameter('dwell', 3.0)
         self.declare_parameter('shuffle', True)
         self.max_fail = self.get_parameter('max_failures').value
+        self.retries = self.get_parameter('retries').value
         self.dwell = self.get_parameter('dwell').value
         self.shuffle = self.get_parameter('shuffle').value
         self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
@@ -91,9 +93,20 @@ def main():
             if node.shuffle:
                 random.shuffle(order)
             for name in order:
-                if node.go(name):
+                ok = False
+                for attempt in range(1, node.retries + 1):
+                    if attempt > 1:
+                        node.get_logger().warn(
+                            f'{name}: retry {attempt}/{node.retries}')
+                        time.sleep(2.0)
+                    if node.go(name):
+                        ok = True
+                        break
+                if ok:
                     fails = 0
                 else:
+                    node.get_logger().error(
+                        f'{name}: failed after {node.retries} attempts')
                     fails += 1
                     if fails >= node.max_fail:
                         node.get_logger().error(
