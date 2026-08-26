@@ -9,6 +9,7 @@ calling spin_until_future_complete from inside a callback deadlocks the
 single-threaded executor against itself.
 """
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from cartographer_ros_msgs.srv import FinishTrajectory, StartTrajectory
@@ -88,11 +89,17 @@ def main():
                 pose = node.pending_pose
                 node.pending_pose = None
                 node.relocalize(pose)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # rclpy's SIGTERM handler has already shut the context down by
+        # the time we get here, and calling it twice raises RCLError --
+        # which exits 1 and makes systemd record a normal stop as a
+        # failure.
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 
 if __name__ == '__main__':

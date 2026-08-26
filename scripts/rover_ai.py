@@ -18,7 +18,8 @@ import threading
 import time
 
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import (ExternalShutdownException,
+                             MultiThreadedExecutor)
 from groq import Groq
 
 sys.path.insert(0, os.path.expanduser('~'))
@@ -330,7 +331,7 @@ def main():
             print('Listening. Ctrl-C to quit.\n')
             while True:
                 threading.Event().wait(1.0)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         stop_flag.set()
@@ -340,7 +341,13 @@ def main():
             voice.close()
         motions.destroy_node()
         nav.destroy_node()
-        rclpy.shutdown()
+        # rclpy's SIGTERM handler has already shut the context down by
+        # the time we get here, and calling it twice raises RCLError --
+        # which exits 1 and makes systemd record a normal stop as a
+        # failure.
+        if rclpy.ok():
+            rclpy.shutdown()
+
 
 
 if __name__ == '__main__':
