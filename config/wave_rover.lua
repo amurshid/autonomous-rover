@@ -1,6 +1,11 @@
 -- Cartographer configuration for Waveshare WAVE ROVER
 -- 2D SLAM (LD19 on /scan) WITH IMU fusion.
--- IMU now arrives over direct GPIO UART
+--
+-- IMU now arrives over direct GPIO UART (~55 Hz, sub-ms jitter) via
+-- ugv_imu_bridge on /imu/data, timestamped on receipt with low, constant
+-- latency. This is clean enough to fuse, unlike the old 10 Hz HTTP path.
+-- With no wheel odometry, the IMU gives Cartographer gravity alignment and
+-- reliable yaw-rate between scans.
 
 include "map_builder.lua"
 include "trajectory_builder.lua"
@@ -10,7 +15,7 @@ options = {
   trajectory_builder = TRAJECTORY_BUILDER,
   map_frame = "map",
   tracking_frame = "base_laser",            -- track at the IMU when fusing IMU
-  published_frame = "base_link",
+  published_frame = "base_link",         -- publish the robot-center pose for PPO
   odom_frame = "odom",
   provide_odom_frame = true,
   publish_frame_projected_to_2d = false,
@@ -35,12 +40,17 @@ options = {
 
 MAP_BUILDER.use_trajectory_builder_2d = true
 
-TRAJECTORY_BUILDER_2D.use_imu_data = false
+TRAJECTORY_BUILDER_2D.use_imu_data = false    -- <— fuse the IMU
 TRAJECTORY_BUILDER_2D.min_range = 0.1
 TRAJECTORY_BUILDER_2D.max_range = 8.0
 TRAJECTORY_BUILDER_2D.missing_data_ray_length = 5.0
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
 TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.5)
+-- The IMU now supplies the rotation prior, so the correlative matcher only
+-- needs a NARROW search around it. Was 40 deg / 0.2 m — a legacy fix for
+-- turn-warping that the scan-timestamp relay already solved. The wide window
+-- let the matcher wander off the IMU prediction in open/symmetric rooms,
+-- snapping the pose to wrong angles (rotating/overlapping/shaking map).
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(15.)
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.1
 
