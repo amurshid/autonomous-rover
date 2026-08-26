@@ -49,3 +49,8 @@ deploy_handoff.md
 vpr_relocalise_log.txt
 vpr_relocalise_log2.txt
 vpr_relocalise_log3.txt
+
+# Machine-local: records that this machine passed the bundle self-test.
+# Fingerprinted on the model, torch, numpy and vpr_relocalise.py, so it
+# re-verifies by itself whenever any of those change.
+.self_test_ok
