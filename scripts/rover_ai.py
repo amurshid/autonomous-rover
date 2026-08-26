@@ -329,7 +329,11 @@ def main():
                     voice.say(reply)
         else:
             print('Listening. Ctrl-C to quit.\n')
-            while True:
+            # rclpy installs a SIGTERM handler, so SIGTERM no longer ends the
+            # process -- it shuts the context down and leaves this loop
+            # spinning. Under systemd that meant a 90 s wait and a SIGKILL on
+            # every stop, taking arecord and the executor threads with it.
+            while rclpy.ok() and not stop_flag.is_set():
                 threading.Event().wait(1.0)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
