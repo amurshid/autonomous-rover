@@ -285,9 +285,11 @@ def run_bench(args) -> int:
     print(f"median      {np.median(lat):.3f} s")
     print(f"p95         {np.percentile(lat, 95):.3f} s   over {len(lat)} frames")
     print(f"worst       {lat.max():.3f} s")
-    # The promotion criterion in deploy_handoff.md 4.4.
+    # 3 s is the ceiling: a cold start should not keep the rover waiting, and
+    # the node must not fall behind the camera it is sampling.
     print("p95 under 3 s: " + ("yes" if np.percentile(lat, 95) < 3.0 else
-                               "NO -- see deploy_handoff.md 4.3 for options"))
+                               "NO -- raise --period, or cap the thread count "
+                               "with OMP_NUM_THREADS"))
     return 0
 
 
@@ -358,6 +360,38 @@ def build_node(args):
             self.get_logger().info(
                 f"{mode}, gate {self.loc.gate} m, one frame every "
                 f"{self.period:.1f} s, {len(self.loc.desc)} reference frames")
+
+            if self.publish:
+                self._wait_for_bridge()
+
+        def _wait_for_bridge(self, limit: float = 30.0):
+            """Block until something is subscribed to /initialpose.
+
+            The publisher is volatile: a pose published before
+            set_initial_pose.py subscribes is dropped by the middleware, with
+            no error and no retry, and the rover boots unlocalised. A fixed
+            sleep in the launch script only hides that on a warm system -- on a
+            cold boot this node may well win the race. Waiting for the
+            subscriber makes the ordering a fact rather than a hope.
+            """
+            t0 = time.time()
+            announced = False
+            while self.pub.get_subscription_count() == 0:
+                if time.time() - t0 > limit:
+                    self.get_logger().error(
+                        f"nothing subscribed to /initialpose after {limit:.0f}s "
+                        f"-- set_initial_pose.py is not running, so any pose "
+                        f"published here would be silently dropped")
+                    raise SystemExit(3)
+                if not announced and time.time() - t0 > 1.0:
+                    self.get_logger().info("waiting for /initialpose subscriber")
+                    announced = True
+                rclpy.spin_once(self, timeout_sec=0.2)
+            self.get_logger().info(
+                f"/initialpose has {self.pub.get_subscription_count()} "
+                f"subscriber(s) after {time.time() - t0:.1f}s")
+            # The clock spent waiting is not the gate's fault.
+            self.started = time.time()
 
         def on_pose(self, msg):
             q = msg.pose.orientation
