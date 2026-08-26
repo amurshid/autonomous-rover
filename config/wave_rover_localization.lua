@@ -1,5 +1,6 @@
 -- Pure localization against a prebuilt house.pbstream.
--- Inherits everything from the mapping config so scans are interpreted exactly as
+-- Inherits everything from the mapping config (IMU off, no odometry,
+-- min_range 0.1 / max_range 8.0) so scans are interpreted exactly as
 -- they were when the map was built. Only localization behavior differs.
 
 include "wave_rover.lua"
@@ -11,6 +12,8 @@ TRAJECTORY_BUILDER.pure_localization_trimmer = {
 }
 
 -- Optimize more often than mapping (was 35) for responsive pose updates.
-POSE_GRAPH.optimize_every_n_nodes = 20
+POSE_GRAPH.optimize_every_n_nodes = 90
 
+MAP_BUILDER.num_background_threads = 2
+POSE_GRAPH.optimization_problem.ceres_solver_options.num_threads = 2
 return options
