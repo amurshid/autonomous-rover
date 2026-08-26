@@ -1,0 +1,8 @@
+[Unit]
+Description=Wave Rover: everything needed to take a command and drive
+Requires=multi-user.target
+After=multi-user.target
+AllowIsolate=no
+
+[Install]
+WantedBy=multi-user.target

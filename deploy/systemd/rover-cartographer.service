@@ -1,0 +1,19 @@
+[Unit]
+Description=Cartographer pure localization against house.pbstream
+# Ordering only -- systemd cannot know when the lidar is producing scans.
+# Cartographer tolerates a late /scan, so this is safe here.
+After=rover-lidar.service
+Requires=rover-lidar.service
+
+[Service]
+Type=simple
+User=amurshid
+WorkingDirectory=/home/amurshid
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec ros2 launch /home/amurshid/cartographer_localization.launch.py'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=rover.target

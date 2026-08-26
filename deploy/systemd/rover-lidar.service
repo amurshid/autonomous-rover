@@ -1,0 +1,17 @@
+[Unit]
+Description=LDROBOT D500 lidar (/scan)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=amurshid
+WorkingDirectory=/home/amurshid
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ldlidar_ros2_ws/install/setup.bash && \
+    exec ros2 launch ldlidar_stl_ros2 ld19.launch.py'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=rover.target

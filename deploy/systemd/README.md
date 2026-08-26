@@ -1,0 +1,110 @@
+# Boot the rover without a keyboard
+
+Units to replace five terminals and a runbook. Power on, and the rover comes up
+localised and ready to take a command.
+
+## The dependency chain
+
+    rover-bridge ──────────────────────────────────────────────┐
+    rover-lidar ──> rover-cartographer ──> rover-initialpose ──┤
+    rover-camera ──────────────────────────────────────────────┴──> rover-relocalise
+                                                                          │
+                                                                          ▼
+                                                                      rover-nav2
+                                                                          │
+                                                                          ▼
+                                                                       rover-ai
+
+`rover-relocalise` is `Type=oneshot` with `RemainAfterExit=yes`, so Nav2's
+`After=` means *after it has finished*, not after it started. A planner brought
+up before the robot knows where it is plans from the wrong place.
+
+## What systemd can and cannot guarantee
+
+`After=` orders **starts**, not readiness. It cannot know when the lidar is
+producing scans, or when Cartographer is ready to accept a pose.
+
+Two places where that mattered:
+
+- **Cartographer before a pose.** `set_initial_pose.py` already calls
+  `wait_for_service` on `/finish_trajectory`, so a late Cartographer is fine.
+- **The bridge before a pose is published.** This one silently lost poses.
+  `/initialpose` is volatile QoS: publish before `set_initial_pose.py` has
+  subscribed and the middleware drops the message with no error, leaving the
+  rover on the hardcoded pose. `vpr_relocalise.py --publish` now blocks until
+  the topic has a subscriber, and exits 3 if none appears within 30 s. The
+  `sleep 5` it replaces was a guess that happened to work on a warm system.
+
+## Failure is not fatal
+
+`rover-relocalise` sets `SuccessExitStatus=2 3`, so neither "no confirmed fix"
+(2) nor "no bridge" (3) stops the boot. Cartographer still runs, and its own
+global localization may find the pose unaided, in about a minute. A rover that
+boots unlocalised is recoverable; a boot that halts partway is not.
+
+## Install
+
+    sudo cp *.service *.target /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable rover.target
+    sudo systemctl enable rover-bridge rover-lidar rover-camera \
+         rover-cartographer rover-initialpose rover-relocalise rover-nav2 rover-ai
+
+## Operating it
+
+    systemctl status 'rover-*'          # what is up
+    journalctl -u rover-relocalise -b   # this boot's relocalisation
+    journalctl -f -u 'rover-*'          # everything, live
+
+    sudo systemctl stop rover.target
+    sudo systemctl start rover.target
+
+To debug one component by hand, stop its unit and run the command from its
+`ExecStart` in a terminal. Nothing here changes how the scripts themselves work.
+
+## Before enabling it at boot
+
+Test the chain with the Pi already running, so a mistake is a failed unit
+rather than a robot that will not boot:
+
+    sudo systemctl start rover.target
+    journalctl -u rover-relocalise -f
+
+Enable at boot only once that has worked twice.
+
+## The API key
+
+`rover_ai.py` exits immediately without `GROQ_API_KEY`, and systemd gives a
+service almost none of your shell's environment — a key that works when you
+type the command by hand is simply absent under systemd. It must not go in the
+unit file either, since units in `/etc/systemd/system` are world-readable:
+
+    sudo install -d -m 750 /etc/rover
+    printf 'GROQ_API_KEY=gsk_...\n' | sudo tee /etc/rover/env >/dev/null
+    sudo chmod 640 /etc/rover/env
+    sudo chown root:amurshid /etc/rover/env
+
+## What happened to start_localization.sh
+
+Nothing — it still works, and is still the way to relocalise by hand. Systemd
+does not call it. It does the same two things as separate units
+(`rover-initialpose` and `rover-relocalise`) because systemd needs to order and
+restart them independently.
+
+One deliberate difference: **the systemd path has no hardcoded-pose fallback.**
+`start_localization.sh` publishes the marked spot when VPR finds no fix. That
+made sense when it was the only option. It no longer is, and it is probably
+worse than nothing now — the marked spot is only correct if someone physically
+put the rover there, it measured 5.66 m wrong on an ordinary boot, and
+Cartographer's own global localization recovers unaided in about a minute.
+Handing a confidently wrong pose to a scan matcher that was going to work it
+out anyway is a bad trade.
+
+If you want the fallback back, add to `rover-relocalise.service`:
+
+    ExecStartPost=/bin/bash -c 'test $$EXIT_STATUS -eq 0 || \
+        ros2 topic pub --once /initialpose ...'
+
+## Still missing
+
+Nothing. All eight units are here.

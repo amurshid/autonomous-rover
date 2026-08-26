@@ -1,0 +1,24 @@
+[Unit]
+Description=Natural-language command interface for the rover
+After=rover-nav2.service
+Requires=rover-nav2.service
+
+[Service]
+Type=simple
+User=amurshid
+WorkingDirectory=/home/amurshid
+# rover_ai.py exits immediately without GROQ_API_KEY, and systemd gives a
+# service almost none of your shell's environment. Keep the key out of this
+# file -- units in /etc/systemd/system are world-readable.
+#   sudo install -d -m 750 /etc/rover
+#   printf 'GROQ_API_KEY=gsk_...\n' | sudo tee /etc/rover/env >/dev/null
+#   sudo chmod 640 /etc/rover/env && sudo chown root:amurshid /etc/rover/env
+EnvironmentFile=/etc/rover/env
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec python3 /home/amurshid/rover_ai.py'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=rover.target
