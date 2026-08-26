@@ -68,16 +68,16 @@ class WaveRoverBridge(Node):
         vl = v - (w * self.wheel_sep / 2.0)
         vr = v + (w * self.wheel_sep / 2.0)
 
-        l = vl / self.max_speed * 0.5
-        r = vr / self.max_speed * 0.5
+        l = vl / self.max_speed * 0.65
+        r = vr / self.max_speed * 0.65
 
         l *= self.left_trim
         r *= self.right_trim
 
         peak = max(abs(l), abs(r))
-        if peak > 0.5:
-            l *= 0.5 / peak
-            r *= 0.5 / peak
+        if peak > 0.65:
+            l *= 0.65 / peak
+            r *= 0.65 / peak
 
         floor = self.deadband_for(l, r)
 
