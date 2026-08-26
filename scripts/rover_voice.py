@@ -197,6 +197,7 @@ class Voice:
                 ["arecord", "-D", MIC, "-q", "-f", "S16_LE",
                  "-r", str(RATE), "-c", "1", "-t", "raw"],
                 stdout=subprocess.PIPE)
+        onset = 0
         return self._proc
 
     def calibrate(self, seconds=1.5, skip=0.4, multiplier=3.0):
@@ -233,7 +234,7 @@ class Voice:
                   f"threshold {self._floor}]")
         return self._floor
 
-    def listen(self, silence_ms=800, max_s=12.0, timeout_s=None):
+    def listen(self, silence_ms=1300, max_s=12.0, timeout_s=None):
         """Block until an utterance is captured. Returns raw PCM bytes, or None."""
         s = self._stream()
         pre, frames = [], []
@@ -266,9 +267,14 @@ class Voice:
                 if len(pre) > PREROLL:
                     pre.pop(0)
                 if level > self._floor:
-                    speaking = True
-                    frames = pre[:] + [data]
-                    pre = []
+                    onset += 1
+                    if onset >= 3:          # ~96 ms of sustained energy
+                        speaking = True
+                        frames = pre[:] + [data]
+                        pre = []
+                        onset = 0
+                else:
+                    onset = 0
                 continue
 
             frames.append(data)
@@ -276,7 +282,14 @@ class Voice:
             if quiet >= quiet_limit or len(frames) >= max_chunks:
                 # Reject blips too short to be a real command.
                 if len(frames) < quiet_limit + 8:
-                    speaking, frames, quiet = False, [], 0
+                    speaking, frames, quiet, onset = False, [], 0, 0
+                    continue
+                loud = sum(1 for f in frames if audioop.rms(f, 2) > self._floor)
+                if loud / len(frames) < 0.08:
+                    if self.verbose:
+                        print(f"[discarded: only {loud}/{len(frames)} "
+                              f"chunks above floor]")
+                    speaking, frames, quiet, onset = False, [], 0, 0
                     continue
                 return b"".join(frames)
 
