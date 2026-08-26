@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bridge /initialpose -> Cartographer trajectory restart.
 
-Cartographer has no /initialpose subscriber. To relocalize, must finish the
+Cartographer has no /initialpose subscriber. To relocalize you must finish the
 active trajectory and start a new one anchored to the frozen map (trajectory 0).
 
 Service calls run in the main loop, NOT in the subscription callback --
