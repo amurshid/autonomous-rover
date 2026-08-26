@@ -189,20 +189,23 @@ class Relocaliser:
         h.update(Path(__file__).read_bytes())
         return h.hexdigest()[:32]
 
-    def self_test_cached(self) -> tuple[bool, float, bool]:
+    def self_test_cached(self, force: bool = False) -> tuple[bool, float, bool]:
         """self_test(), skipped when nothing that could change its answer has.
 
         Embedding 20 golden frames costs ~25 s on the Pi's two threads, every
         boot, in the boot path -- and it can only fail if the bundle, torch,
-        numpy or this file changed. Returns (ok, worst, ran).
+        numpy or this file changed. force=True always runs it but still records
+        the result, so --self-test warms the cache instead of bypassing it.
+        Returns (ok, worst, ran).
         """
         stamp = Path(self.bundle) / ".self_test_ok"
         fp = self._fingerprint()
-        try:
-            if stamp.read_text().strip() == fp:
-                return True, float("nan"), False
-        except OSError:
-            pass
+        if not force:
+            try:
+                if stamp.read_text().strip() == fp:
+                    return True, float("nan"), False
+            except OSError:
+                pass
         ok, worst = self.self_test()
         if ok:
             try:
@@ -243,7 +246,10 @@ class Relocaliser:
 def run_self_test(args) -> int:
     loc = Relocaliser(args.bundle, gate=args.gate, seq_tau=args.seq_tau,
                       sim_floor=args.sim_floor)
-    ok, worst = loc.self_test()
+    # force=True: --self-test exists to actually check, not to trust a stamp.
+    # It still records the result, so running it before a boot makes that boot
+    # fast rather than costing 25 s twice.
+    ok, worst, _ = loc.self_test_cached(force=True)
     print(f"self-test {'PASSED' if ok else 'FAILED'} (worst cosine {worst:.6f}, "
           f"tolerance {loc.manifest['golden']['tolerance']})")
     if not ok:
