@@ -6,6 +6,9 @@ Requires=rover-nav2.service
 [Service]
 Type=simple
 User=amurshid
+# arecord and aplay need the audio group; a login shell grants it, a service
+# does not inherit it.
+SupplementaryGroups=audio
 WorkingDirectory=/home/amurshid
 # rover_ai.py exits immediately without GROQ_API_KEY, and systemd gives a
 # service almost none of your shell's environment. Keep the key out of this
@@ -14,9 +17,13 @@ WorkingDirectory=/home/amurshid
 #   printf 'GROQ_API_KEY=gsk_...\n' | sudo tee /etc/rover/env >/dev/null
 #   sudo chmod 640 /etc/rover/env && sudo chown root:amurshid /etc/rover/env
 EnvironmentFile=/etc/rover/env
+# --voice, not the default. With no flags rover_ai.py runs its text REPL
+# ("use_text = args.text or not args.voice"), which reads stdin -- and a
+# systemd service has none, so it would hit EOF at startup. Voice is also the
+# only interface that makes sense on a robot with no keyboard attached.
 ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
     source /home/amurshid/ros2_ws/install/setup.bash && \
-    exec python3 /home/amurshid/rover_ai.py'
+    exec python3 /home/amurshid/rover_ai.py --voice'
 Restart=on-failure
 RestartSec=5
 
