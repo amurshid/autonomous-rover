@@ -339,8 +339,14 @@ def main():
         pass
     finally:
         stop_flag.set()
-        nav.cancel()
-        motions.do_stop()
+        # SIGTERM shuts the context down before this runs, so anything that
+        # publishes raises "publisher's context is invalid". Skip those two
+        # when the context has gone: the bridge zeroes the motors 0.5 s after
+        # /cmd_vel stops arriving (command_timeout), so the rover halts either
+        # way.
+        if rclpy.ok():
+            nav.cancel()
+            motions.do_stop()
         if voice:
             voice.close()
         motions.destroy_node()
