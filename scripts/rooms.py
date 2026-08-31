@@ -32,9 +32,12 @@ ROOM_NAMES = sorted(ROOMS)
 # renaming them would split the map from the data it was built from.
 #
 # The article travels with the name because not every room takes "the" --
-# "arrived at the kitchen" is right, "arrived at the my room" is not.
+# "arrived at the kitchen" is right, "arrived at bedroom 1" takes none.
+#
+# work_room is deliberately absent: "my room" is accepted as input (see
+# ALIASES) but the rover says "the work room" back, so what it reports always
+# matches the name on the map.
 SPOKEN = {
-    "work_room":    "my room",
     "bedroom_1": "bedroom 1",
     "bedroom_2": "bedroom 2",
 }
