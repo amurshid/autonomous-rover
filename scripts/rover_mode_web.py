@@ -50,11 +50,15 @@ MODES = {
 }
 
 
-def systemctl(*args, check=False):
-    """Run systemctl, never raising -- the page must survive a failed call."""
+def systemctl(*args, root=False):
+    """Run systemctl, never raising -- the page must survive a failed call.
+
+    Only starting a target needs root. Reading state does not, so status works
+    before the sudoers rule is installed, and the rule stays narrower.
+    """
+    cmd = (["sudo", "-n"] if root else []) + ["systemctl", *args]
     try:
-        r = subprocess.run(["sudo", "-n", "systemctl", *args],
-                           capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         return r.returncode, (r.stdout + r.stderr).strip()
     except Exception as e:
         return 1, str(e)
@@ -324,7 +328,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, "unknown mode", "text/plain")
         # Conflicts= in the target files stops the other mode; starting the
         # one we want is the whole operation.
-        code, out = systemctl("start", "--no-block", MODES[key]["target"])
+        code, out = systemctl("start", "--no-block", MODES[key]["target"],
+                              root=True)
         self._send(200 if code == 0 else 500,
                    json.dumps({"ok": code == 0, "detail": out}),
                    "application/json")
