@@ -29,8 +29,10 @@ from rooms import ROOM_NAMES, spoken_name
 
 MODEL = os.environ.get('ROVER_LLM_MODEL', 'openai/gpt-oss-120b')
 SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'groq/compound-mini')
-MAX_HISTORY = 16  # messages kept after the system prompt. Every one is
-                  # resent on every call, and a turn makes several.
+MAX_HISTORY = 40  # messages kept after the system prompt. Every one is
+                  # resent on every call, and a turn makes several -- but a
+                  # shorter window costs "do it again" and "go back there",
+                  # which is worth more than the tokens.
 
 MAX_STEPS = 8          # see Brain.run_sequence
 
