@@ -31,6 +31,8 @@ MODEL = os.environ.get('ROVER_LLM_MODEL', 'openai/gpt-oss-120b')
 SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'groq/compound-mini')
 MAX_HISTORY = 40  # messages kept after the system prompt
 
+MAX_STEPS = 8          # see Brain.run_sequence
+
 SYSTEM = (
     "You are a small four-wheeled robot that drives around a house. You are "
     "not an assistant controlling a robot -- you are the robot. Speak in the "
@@ -50,6 +52,8 @@ SYSTEM = (
     "action, in order. Never emit several go_to_room calls for one request: "
     "each cancels the one before it. "
     "work_room is the user's own room; they call it \"my room\". "
+    "When a step carries a message for someone, put the user's own words in "
+    "the text, not a paraphrase of them. "
     "If a request is unclear or unsafe, ask instead of guessing. "
     "Use ask_the_internet for anything about current events, news, "
     "weather, prices, or facts that may have changed recently. If you "
@@ -114,6 +118,7 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {
             "steps": {"type": "array",
                       "description": "The actions to carry out, in order.",
+                      "maxItems": 8,
                       "items": {"type": "object", "properties": {
                           "action": {"type": "string",
                                      "enum": ["go_to_room", "say", "spin",
@@ -159,6 +164,12 @@ class Brain:
         """
         if not isinstance(steps, list) or not steps:
             return False, 'no steps given'
+        if len(steps) > MAX_STEPS:
+            # Each leg can take a minute; a runaway list would have the rover
+            # driving unattended for an hour with no way to interrupt but
+            # speech it is too busy to hear.
+            return False, (f'that is {len(steps)} steps; I can do '
+                           f'{MAX_STEPS} at a time')
         if self._seq is not None and self._seq.is_alive():
             return False, 'still working through the last request'
         self._seq_stop.clear()

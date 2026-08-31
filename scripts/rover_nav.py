@@ -27,7 +27,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
 sys.path.insert(0, os.path.expanduser("~"))
-from rooms import ROOMS  # noqa: E402
+from rooms import ROOMS, resolve_room  # noqa: E402
 
 
 class RoverNav(Node):
@@ -90,8 +90,10 @@ class RoverNav(Node):
 
     def go_to_room(self, room):
         """Fire a NavigateToPose goal. Returns (ok, message) immediately."""
-        if room not in ROOMS:
+        key = resolve_room(room)
+        if key is None:
             return False, f"unknown room '{room}'"
+        room = key
 
         if not self._client.wait_for_server(timeout_sec=3.0):
             return False, "nav2 navigate_to_pose server not available -- is nav2 running?"

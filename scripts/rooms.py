@@ -8,6 +8,8 @@ Format: (x, y, qz, qw) in the `map` frame. Orientation is yaw-only, so qx
 and qy are always zero.
 """
 
+from __future__ import annotations
+
 ROOMS = {
     "work_room":        (  2.276,  8.183, -0.8196,  0.5730),
     "entrance":         ( -2.94,   7.20,  -0.582,  -0.813),
@@ -36,6 +38,47 @@ SPOKEN = {
     "bedroom_1": "bedroom 1",
     "bedroom_2": "bedroom 2",
 }
+
+
+# What a person might actually say. The model is told the canonical keys, but
+# it paraphrases, and so do people -- "my room", "bedroom 1's", "the front door".
+# Resolving here means a near-miss reaches the right room instead of failing.
+ALIASES = {
+    "my room":            "work_room",
+    "work room":          "work_room",
+    "person_1":            "bedroom_1",
+    "bedroom 1":      "bedroom_1",
+    "bedroom 1":     "bedroom_1",
+    "bedroom 2":       "bedroom_2",
+    "bedroom 2":      "bedroom_2",
+    "bedroom 2":    "bedroom_2",
+    "bedroom 2":   "bedroom_2",
+    "office":             "office_room",
+    "dining":             "dining_room",
+    "living":             "living_room",
+    "formal living room": "formal_living",
+    "front door":         "entrance",
+    "door":               "entrance",
+    "breakfast":          "breakfast_table",
+    "breakfast room":     "breakfast_table",
+}
+
+
+def resolve_room(name: str) -> str | None:
+    """Map whatever was said to a key in ROOMS, or None if it is not a room."""
+    if not name:
+        return None
+    n = " ".join(name.strip().lower().replace("_", " ").replace("-", " ").split())
+    if n.startswith("the "):
+        n = n[4:]
+    for candidate in (n, n.replace(" ", "_")):
+        if candidate in ROOMS:
+            return candidate
+    if n in ALIASES:
+        return ALIASES[n]
+    # "my room." from speech, or a trailing possessive
+    n = n.rstrip(".!?,")
+    return ALIASES.get(n)
 
 
 def spoken_name(room: str) -> str:
