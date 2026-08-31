@@ -66,8 +66,10 @@ SYSTEM = (
     "weather, prices, or facts that may have changed recently. If you "
     "are unsure whether your knowledge is current, call it. "
     "Your replies are read aloud, so reply with exactly one short sentence. "
-    "Never add a second sentence such as \"Done.\" or \"Let me know if you "
-    "need anything else.\" No lists, no markdown, no emoji."
+    "Never announce that you have finished: no \"Done.\", \"Task "
+    "completed.\", \"I have completed the task.\", \"Let me know if you "
+    "need anything else.\" The action itself is the answer. No lists, no "
+    "markdown, no emoji."
 )
 
 TOOLS = [
@@ -389,7 +391,11 @@ class Brain:
             self.history.append(m2.model_dump(exclude_none=True))
             more = m2.tool_calls or []
             if not more:
-                reply = m2.content or 'done'
+                # Empty is a legitimate answer: the prompt asks for it when a
+                # run_sequence step has already spoken. Substituting "done"
+                # here made the rover announce the completion of every task it
+                # had just narrated.
+                reply = m2.content or ''
                 return reply
             for c in more:
                 try:
@@ -456,7 +462,8 @@ def main():
                     continue
                 print(f'\nyou (voice) > {heard}')
                 reply = brain.ask(heard)
-                print(f'bot > {reply}\n')
+                if reply:
+                    print(f'bot > {reply}\n')
                 voice.say(reply)
                 brain.release_sequence()
             except Exception as e:
@@ -476,7 +483,8 @@ def main():
                 if not text:
                     continue
                 reply = brain.ask(text)
-                print(f'bot > {reply}\n')
+                if reply:
+                    print(f'bot > {reply}\n')
                 if voice:
                     voice.say(reply)
                 brain.release_sequence()
