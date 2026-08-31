@@ -1,5 +1,10 @@
 [Unit]
-Description=Wave Rover: everything needed to take a command and drive
+Description=Rover, autonomous: localises itself, navigates, listens
+# Conflicts is what makes the two modes exclusive. Starting either stops
+# the other, so Nav2 and the teleop page can never both drive /cmd_vel.
+Conflicts=rover-teleop.target
+Requires=rover-common.target
+After=rover-common.target
 Requires=multi-user.target
 After=multi-user.target
 AllowIsolate=no

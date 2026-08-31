@@ -3,6 +3,36 @@
 Units to replace five terminals and a runbook. Power on, and the rover comes up
 localised and ready to take a command.
 
+## Two modes
+
+The rover runs one of two, never both -- Nav2 and a human must not both be
+publishing `/cmd_vel`:
+
+    rover-common.target      motors + camera, shared by both
+        |
+        +-- rover.target          autonomous: lidar, cartographer,
+        |                         relocalisation, nav2, voice
+        |
+        +-- rover-teleop.target   remote control: the teleop page
+
+`Conflicts=` between the two mode targets is what makes them exclusive:
+starting either stops the other, with no sequencing to remember. The motors and
+camera sit outside both, so a switch does not cycle them -- no motor glitch, and
+the camera's auto-exposure does not have to settle again.
+
+`rover-mode.service` serves the switcher page on **port 80**, so the whole
+address is `http://ahnaf-pi.local`. It belongs to neither mode and runs always:
+if it goes down there is no way back without SSH, which is what it exists to
+avoid. It needs no ROS. Picking remote control waits for the teleop port to
+actually answer, then redirects to it -- systemd calls a unit active the moment
+the process starts, which is well before the page is servable, and redirecting
+then gives a connection-refused that reads as "it is broken".
+
+Starting a target needs root, so `rover-mode.sudoers` grants that user exactly
+two `systemctl start` commands and `is-active`. Not blanket sudo: a page
+reachable from the home network should not be able to do more than change the
+mode.
+
 ## The dependency chain
 
     rover-bridge ──────────────────────────────────────────────┐

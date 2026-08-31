@@ -1,0 +1,23 @@
+[Unit]
+Description=Teleop web UI (drive by hand, camera streamed)
+After=rover-common.target
+Requires=rover-common.target
+
+# WantedBy only starts; PartOf is what makes "systemctl stop
+# rover-teleop.target" stop this too.
+PartOf=rover-teleop.target
+
+[Service]
+Type=simple
+User=amurshid
+WorkingDirectory=/home/amurshid
+# Subscribes to /camera/image_raw rather than opening the camera itself, so it
+# coexists with rover-camera.service instead of fighting it for the device.
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec python3 /home/amurshid/rover_teleop_web.py'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=rover-teleop.target

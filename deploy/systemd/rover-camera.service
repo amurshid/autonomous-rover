@@ -4,8 +4,10 @@ After=network-online.target
 Wants=network-online.target
 
 # WantedBy only starts; PartOf is what makes "systemctl stop
-# rover.target" stop this too.
-PartOf=rover.target
+# rover-common.target" stop this too. It is in the shared
+# target because both modes need it: a mode switch must not
+# cycle the motors or make the camera settle again.
+PartOf=rover-common.target
 
 [Service]
 Type=simple
@@ -22,4 +24,4 @@ Restart=always
 RestartSec=3
 
 [Install]
-WantedBy=rover.target
+WantedBy=rover-common.target

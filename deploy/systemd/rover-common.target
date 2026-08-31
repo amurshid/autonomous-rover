@@ -1,0 +1,11 @@
+[Unit]
+Description=Rover hardware shared by both modes
+# The motors and the camera are wanted whichever mode is running, so they sit
+# outside both. Switching modes then leaves them alone: no motor glitch, and
+# no waiting for the camera's auto-exposure to settle a second time.
+Requires=multi-user.target
+After=multi-user.target
+AllowIsolate=no
+
+[Install]
+WantedBy=multi-user.target

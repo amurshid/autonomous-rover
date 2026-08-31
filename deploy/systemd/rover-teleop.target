@@ -1,0 +1,11 @@
+[Unit]
+Description=Rover, remote control: you drive, camera streamed to the phone
+# The other half of the pair. Starting this stops the autonomous stack, which
+# is the point: Nav2 and a human must never both be publishing /cmd_vel.
+Conflicts=rover.target
+Requires=rover-common.target
+After=rover-common.target
+AllowIsolate=no
+
+[Install]
+WantedBy=multi-user.target

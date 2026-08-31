@@ -1,0 +1,12 @@
+# Install as /etc/sudoers.d/rover-mode  (mode 0440, owned by root)
+#   sudo install -m 0440 -o root -g root rover-mode.sudoers /etc/sudoers.d/rover-mode
+#
+# The switcher page runs as amurshid and needs to start targets and read unit
+# state. This grants exactly those commands and nothing else -- not blanket
+# sudo -- so a page reachable from the home network cannot do more than change
+# which mode the rover is in.
+amurshid ALL=(root) NOPASSWD: /usr/bin/systemctl start rover.target, \
+                              /usr/bin/systemctl start --no-block rover.target, \
+                              /usr/bin/systemctl start rover-teleop.target, \
+                              /usr/bin/systemctl start --no-block rover-teleop.target, \
+                              /usr/bin/systemctl is-active *
