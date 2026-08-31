@@ -25,9 +25,24 @@ ROOMS = {
 ROOM_NAMES = sorted(ROOMS)
 
 
+# What each room is called out loud, article included. The keys stay as they
+# are: they match the labels in the VPR database and the recorded sessions, and
+# renaming them would split the map from the data it was built from.
+#
+# The article travels with the name because not every room takes "the" --
+# "arrived at the kitchen" is right, "arrived at the my room" is not.
+SPOKEN = {
+    "work_room":    "my room",
+    "bedroom_1": "bedroom 1",
+    "bedroom_2": "bedroom 2",
+}
+
+
 def spoken_name(room: str) -> str:
-    """'breakfast_table' -> 'breakfast table', for TTS output."""
-    return room.replace("_", " ")
+    """'breakfast_table' -> 'the breakfast table', ready to follow a preposition."""
+    if room in SPOKEN:
+        return SPOKEN[room]
+    return "the " + room.replace("_", " ")
 
 
 if __name__ == "__main__":

@@ -32,15 +32,24 @@ SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'groq/compound-mini')
 MAX_HISTORY = 40  # messages kept after the system prompt
 
 SYSTEM = (
-    "You control a small four-wheeled robot that drives around a house. "
+    "You are a small four-wheeled robot that drives around a house. You are "
+    "not an assistant controlling a robot -- you are the robot. Speak in the "
+    "first person: \"I am on my way\", \"I have arrived\", \"I cannot "
+    "reach that room\". Never call yourself \"the rover\" or \"the "
+    "robot\". "
     "Translate the user's request into tool calls. "
     "Angles are degrees: positive is counter-clockwise (left), negative is "
     "clockwise (right). Distances are metres: positive is forward, negative "
     "is backward. A full circle is 360 degrees. "
     "To move between rooms always use go_to_room -- it uses the map and "
     "avoids obstacles. Only use drive and spin for small local adjustments. "
-    "go_to_room returns as soon as the robot sets off, not when it arrives; "
-    "say that it is on its way, never that it has arrived. "
+    "go_to_room returns as soon as you set off, not when you arrive; say you "
+    "are on your way, never that you have arrived. "
+    "When a request has more than one part -- go somewhere, say something "
+    "there, then go somewhere else -- use run_sequence with one step per "
+    "action, in order. Never emit several go_to_room calls for one request: "
+    "each cancels the one before it. "
+    "work_room is the user's own room; they call it \"my room\". "
     "If a request is unclear or unsafe, ask instead of guessing. "
     "Use ask_the_internet for anything about current events, news, "
     "weather, prices, or facts that may have changed recently. If you "
@@ -96,6 +105,30 @@ TOOLS = [
                        "description": "Metres to drive. Positive = forward."}},
             "required": ["meters"]}}},
     {"type": "function", "function": {
+        "name": "run_sequence",
+        "description": (
+            "Carry out several actions one after another, each finishing "
+            "before the next begins. Use this for any request with more than "
+            "one part -- go to a room, say something there, then go "
+            "somewhere else."),
+        "parameters": {"type": "object", "properties": {
+            "steps": {"type": "array",
+                      "description": "The actions to carry out, in order.",
+                      "items": {"type": "object", "properties": {
+                          "action": {"type": "string",
+                                     "enum": ["go_to_room", "say", "spin",
+                                              "drive", "stop"]},
+                          "room": {"type": "string", "enum": ROOM_NAMES,
+                                   "description": "for go_to_room"},
+                          "text": {"type": "string",
+                                   "description": "for say; spoken aloud"},
+                          "degrees": {"type": "number",
+                                      "description": "for spin"},
+                          "meters": {"type": "number",
+                                     "description": "for drive"}},
+                          "required": ["action"]}}},
+            "required": ["steps"]}}},
+    {"type": "function", "function": {
         "name": "stop",
         "description": "Stop the robot immediately, including any navigation.",
         "parameters": {"type": "object", "properties": {}}}},
@@ -110,6 +143,85 @@ class Brain:
         self.client = Groq(api_key=os.environ['GROQ_API_KEY'])
         self.history = [{"role": "system", "content": SYSTEM}]
         self.lock = threading.Lock()
+        self._seq = None                    # worker running a queued sequence
+        self._seq_stop = threading.Event()  # set by stop / cancel_navigation
+
+    # ----------------------------------------------------------- sequences
+
+    def run_sequence(self, steps):
+        """Run several actions in order, each finishing before the next.
+
+        go_to_room returns the moment Nav2 accepts the goal, so a model that
+        emits three of them in one turn has the rover abandon the first two --
+        each new goal preempts the last. Steps run on a worker thread that
+        waits for arrival in between, and this returns straight away so the
+        rover can answer "on my way" rather than going silent for a minute.
+        """
+        if not isinstance(steps, list) or not steps:
+            return False, 'no steps given'
+        if self._seq is not None and self._seq.is_alive():
+            return False, 'still working through the last request'
+        self._seq_stop.clear()
+        self._seq = threading.Thread(target=self._run_steps, args=(list(steps),),
+                                     daemon=True)
+        self._seq.start()
+        return True, f'started {len(steps)} steps'
+
+    def abort_sequence(self):
+        self._seq_stop.set()
+
+    def _speak(self, text):
+        text = (text or '').strip()
+        if not text:
+            return
+        print(f'bot > {text}')
+        if self.voice:
+            self.voice.say(text, block=True)
+
+    def _run_steps(self, steps):
+        for i, step in enumerate(steps, 1):
+            if self._seq_stop.is_set():
+                return
+            action = (step.get('action') or '').strip()
+            if action == 'say':
+                self._speak(step.get('text', ''))
+                continue
+            if action == 'go_to_room':
+                room = step.get('room', '')
+                ok, msg = self.nav.go_to_room(room)
+                if not ok:
+                    self._speak(f'I could not set off for '
+                                f'{spoken_name(room)}. {msg}')
+                    return
+                if not self._await_arrival():
+                    return
+                continue
+            ok, msg = self.dispatch(action, step)
+            if not ok:
+                self._speak(f'I could not do step {i}. {msg}')
+                return
+
+    def _await_arrival(self, timeout=240.0):
+        """Block until the goal settles. False if it failed or timed out.
+
+        A failed leg must stop the sequence: there is no point delivering a
+        message in a room the rover never reached.
+        """
+        deadline = time.time() + timeout
+        self.nav.last_outcome = None
+        # The action server needs a moment to report that it has started, and
+        # is_navigating() reads False in the gap.
+        time.sleep(1.5)
+        while self.nav.is_navigating():
+            if self._seq_stop.is_set():
+                return False
+            if time.time() > deadline:
+                self.nav.cancel()
+                self._speak('That is taking too long, so I have stopped.')
+                return False
+            time.sleep(0.3)
+        # announce() already says what happened, so stay quiet on failure.
+        return self.nav.last_outcome in (None, 'arrived')
 
     # -------------------------------------------------------------- retry
 
@@ -132,8 +244,15 @@ class Brain:
         if name in ('spin', 'drive') and self.nav.is_navigating():
             self.nav.cancel()
 
+        if name == 'run_sequence':
+            return self.run_sequence(args.get('steps', []))
         if name == 'go_to_room':
             return self.nav.go_to_room(args.get('room', ''))
+        if name in ('stop', 'cancel_navigation'):
+            # Otherwise the sequence worker cheerfully starts the next step
+            # a moment after being told to stop.
+            self.abort_sequence()
+
         if name == 'cancel_navigation':
             ok, msg = self.nav.cancel()
             self.m.do_stop()
@@ -272,9 +391,9 @@ def main():
     def announce(room, outcome, detail):
         """Fires on an executor thread when a nav goal settles."""
         line = {
-            'arrived':  f'I have arrived at the {spoken_name(room)}.',
-            'failed':   f'I could not reach the {spoken_name(room)}.',
-            'rejected': f'The navigation stack refused the {spoken_name(room)} goal.',
+            'arrived':  f'I have arrived at {spoken_name(room)}.',
+            'failed':   f'I could not reach {spoken_name(room)}.',
+            'rejected': f'I could not accept that goal for {spoken_name(room)}.',
         }.get(outcome)
         if not line:
             return
@@ -291,13 +410,13 @@ def main():
     threading.Thread(target=ex.spin, daemon=True).start()
 
     brain = Brain(motions, nav, voice)
-    print(f'Rover AI ready ({MODEL}). Rooms: {", ".join(ROOM_NAMES)}')
+    print(f'Ready ({MODEL}). Rooms: {", ".join(ROOM_NAMES)}')
 
     stop_flag = threading.Event()
 
     def voice_loop():
         voice.calibrate()
-        voice.say('Rover ready.')
+        voice.say('I am ready.')
         while not stop_flag.is_set():
             try:
                 heard = voice.listen_once()
@@ -339,6 +458,7 @@ def main():
         pass
     finally:
         stop_flag.set()
+        brain.abort_sequence()
         # SIGTERM shuts the context down before this runs, so anything that
         # publishes raises "publisher's context is invalid". Skip those two
         # when the context has gone: the bridge zeroes the motors 0.5 s after

@@ -35,6 +35,7 @@ class RoverNav(Node):
         super().__init__("rover_nav")
         self.cb = ReentrantCallbackGroup()
         self.on_done = on_done
+        self.last_outcome = None
 
         self._client = ActionClient(
             self, NavigateToPose, "navigate_to_pose", callback_group=self.cb
@@ -162,6 +163,11 @@ class RoverNav(Node):
         with self._lock:
             room, self._target, self._handle = self._target, None, None
             self._remaining = None
+            # A caller waiting on is_navigating() only learns that the goal
+            # settled, not whether it arrived. A queued sequence has to know:
+            # there is no point delivering a message in a room it never
+            # reached.
+            self.last_outcome = outcome
         # cancel() already cleared _target, so a user-issued stop stays silent.
         if room is None or self.on_done is None:
             return
