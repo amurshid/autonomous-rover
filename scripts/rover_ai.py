@@ -377,6 +377,12 @@ class Brain:
             except Exception as e:
                 print(f'[reply failed: {e}]')
                 return 'Sorry, something went wrong.'
+            # A reply that stops mid-thought is either the model doing it or
+            # max_tokens cutting it off, and they need different fixes. The
+            # API says which; without this the two are indistinguishable.
+            fr = r2.choices[0].finish_reason
+            if fr not in (None, 'stop', 'tool_calls'):
+                print(f'[reply ended early: finish_reason={fr}]')
             m2 = r2.choices[0].message
             self.history.append(m2.model_dump(exclude_none=True))
             more = m2.tool_calls or []
