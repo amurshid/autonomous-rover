@@ -27,7 +27,18 @@ from rover_motions import Motions
 from rover_nav import RoverNav
 from rooms import ROOM_NAMES, spoken_name
 
-MODEL = os.environ.get('ROVER_LLM_MODEL', 'openai/gpt-oss-120b')
+# Groq meters tokens per day per model, not per organisation, so each of
+# these carries its own 200k allowance. Exhausting one leaves the rest
+# untouched -- the same limit four times over, provided we move across when
+# one runs dry. Ordered best-first; all four support tool calling.
+MODELS = [m.strip() for m in os.environ.get(
+    'ROVER_LLM_MODELS',
+    'openai/gpt-oss-120b,openai/gpt-oss-20b,'
+    'qwen/qwen3.8-27b,qwen/qwen3.6-27b').split(',') if m.strip()]
+# ROVER_LLM_MODEL still pins a single model, for testing one in isolation.
+if os.environ.get('ROVER_LLM_MODEL'):
+    MODELS = [os.environ['ROVER_LLM_MODEL']]
+MODEL = MODELS[0]
 SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'groq/compound-mini')
 MAX_HISTORY = 40  # messages kept after the system prompt. Every one is
                   # resent on every call, and a turn makes several -- but a
@@ -147,6 +158,7 @@ class Brain:
         self.client = Groq(api_key=os.environ['GROQ_API_KEY'])
         self.history = [{"role": "system", "content": SYSTEM}]
         self.lock = threading.Lock()
+        self._model_i = 0                   # index into MODELS
         self._seq = None                    # worker running a queued sequence
         self._seq_stop = threading.Event()  # set by stop / cancel_navigation
         # The worker must not speak before this turn's reply does. say() is a
@@ -249,17 +261,40 @@ class Brain:
 
     # -------------------------------------------------------------- retry
 
+    @staticmethod
+    def _is_rate_limit(e):
+        return getattr(e, 'status_code', None) == 429 or \
+            'rate_limit_exceeded' in str(e) or 'Rate limit reached' in str(e)
+
     def _complete(self, **kw):
-        """Call Groq, retrying transient failures. Raises on final failure."""
+        """Call the LLM, moving to the next model when one is out of tokens.
+
+        A daily limit is not a transient failure: sleeping and retrying the
+        same model just fails again tomorrow's worth of times. Each model has
+        its own allowance, so the useful response is to switch. Other errors
+        still get a short backoff, since those usually are transient.
+        """
+        kw.pop('model', None)
         last = None
-        for attempt in range(3):
-            try:
-                return self.client.chat.completions.create(**kw)
-            except Exception as e:
-                last = e
-                print(f'[llm attempt {attempt + 1}/3 failed: {e}]')
-                time.sleep(0.6 * (attempt + 1))
-        raise last
+        while True:
+            model = MODELS[self._model_i]
+            for attempt in range(3):
+                try:
+                    return self.client.chat.completions.create(model=model, **kw)
+                except Exception as e:
+                    last = e
+                    if self._is_rate_limit(e):
+                        break       # retrying an exhausted model is pointless
+                    print(f'[llm attempt {attempt + 1}/3 failed: {e}]')
+                    time.sleep(0.6 * (attempt + 1))
+            # Switching costs no attempt of its own, or with four models and
+            # three attempts the last one would never be reached.
+            if self._is_rate_limit(last) and self._model_i + 1 < len(MODELS):
+                self._model_i += 1
+                print(f'[{model} is out of tokens for today; '
+                      f'switching to {MODELS[self._model_i]}]')
+                continue
+            raise last
 
     # ------------------------------------------------------------ dispatch
 
@@ -345,7 +380,7 @@ class Brain:
         self._trim()
         try:
             r = self._complete(
-                model=MODEL, messages=self.history,
+                messages=self.history,
                 tools=TOOLS, tool_choice="auto", max_tokens=400)
         except Exception:
             self.history.pop()
@@ -371,8 +406,8 @@ class Brain:
 
         for _ in range(3):          # allow a few chained tool calls
             try:
-                r2 = self.client.chat.completions.create(
-                    model=MODEL, messages=self.history,
+                r2 = self._complete(
+                    messages=self.history,
                     tools=TOOLS, tool_choice="auto", max_tokens=100)
             except Exception as e:
                 print(f'[reply failed: {e}]')
@@ -444,7 +479,7 @@ def main():
     threading.Thread(target=ex.spin, daemon=True).start()
 
     brain = Brain(motions, nav, voice)
-    print(f'Ready ({MODEL}). Rooms: {", ".join(ROOM_NAMES)}')
+    print(f'Ready ({" -> ".join(MODELS)}). Rooms: {", ".join(ROOM_NAMES)}')
 
     stop_flag = threading.Event()
 
