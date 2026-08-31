@@ -152,6 +152,11 @@ class Brain:
         self.lock = threading.Lock()
         self._seq = None                    # worker running a queued sequence
         self._seq_stop = threading.Event()  # set by stop / cancel_navigation
+        # The worker must not speak before this turn's reply does. say() is a
+        # FIFO queue, so whichever thread calls it first wins -- and the worker
+        # starts while ask() is still returning, which had the rover deliver a
+        # step's message before saying it was on its way.
+        self._seq_go = threading.Event()
 
     # ----------------------------------------------------------- sequences
 
@@ -175,6 +180,7 @@ class Brain:
         if self._seq is not None and self._seq.is_alive():
             return False, 'still working through the last request'
         self._seq_stop.clear()
+        self._seq_go.clear()
         self._seq = threading.Thread(target=self._run_steps, args=(list(steps),),
                                      daemon=True)
         self._seq.start()
@@ -191,7 +197,15 @@ class Brain:
         if self.voice:
             self.voice.say(text, block=True)
 
+    def release_sequence(self):
+        """Let a queued sequence begin. Called once this turn's reply is queued."""
+        self._seq_go.set()
+
     def _run_steps(self, steps):
+        # Wait for the acknowledgement to be queued first, so "on my way"
+        # always precedes anything a step says. The timeout covers a caller
+        # that never releases -- late is better than silent.
+        self._seq_go.wait(timeout=10.0)
         for i, step in enumerate(steps, 1):
             if self._seq_stop.is_set():
                 return
@@ -439,6 +453,7 @@ def main():
                 reply = brain.ask(heard)
                 print(f'bot > {reply}\n')
                 voice.say(reply)
+                brain.release_sequence()
             except Exception as e:
                 print(f'[voice loop error: {e}]')
 
@@ -459,6 +474,7 @@ def main():
                 print(f'bot > {reply}\n')
                 if voice:
                     voice.say(reply)
+                brain.release_sequence()
         else:
             print('Listening. Ctrl-C to quit.\n')
             # rclpy installs a SIGTERM handler, so SIGTERM no longer ends the
