@@ -160,6 +160,7 @@ class Brain:
         self.lock = threading.Lock()
         self._model_i = 0                   # index into MODELS
         self._seen = {}                     # tool results, this turn
+        self._failed = {}                   # tools that failed, this turn
         self._seq = None                    # worker running a queued sequence
         self._seq_stop = threading.Event()  # set by stop / cancel_navigation
         # The worker must not speak before this turn's reply does. say() is a
@@ -305,14 +306,24 @@ class Brain:
         Movement is exempt: "spin 90 twice" is two spins, not one.
         """
         key = (name, json.dumps(args, sort_keys=True))
-        if name not in ('spin', 'drive', 'go_to_room', 'run_sequence') \
-                and key in self._seen:
-            print(f'  -> {name}({args})  [already asked this turn]')
-            ok, result = self._seen[key]
-            return ok, result
+        movement = name in ('spin', 'drive', 'go_to_room', 'run_sequence')
+        if not movement:
+            # A failure is about the tool, not the phrasing. Rewording a
+            # question the search could not answer just spends the request
+            # again -- which is how one weather question became three
+            # identical failures.
+            if name in self._failed:
+                print(f'  -> {name}({args})  [already failed this turn]')
+                return self._failed[name]
+            if key in self._seen:
+                print(f'  -> {name}({args})  [already asked this turn]')
+                return self._seen[key]
         print(f'  -> {name}({args})')
         ok, result = self.dispatch(name, args)
-        self._seen[key] = (ok, result)
+        if ok:
+            self._seen[key] = (ok, result)
+        elif not movement:
+            self._failed[name] = (ok, result)
         return ok, result
 
     def dispatch(self, name, args):
@@ -371,8 +382,16 @@ class Brain:
                      "no markdown or lists. It will be read aloud."},
                     {"role": "user", "content": question}],
                 max_tokens=300)
-            return True, (r.choices[0].message.content or '').strip()
+            answer = (r.choices[0].message.content or '').strip()
+            if not answer:
+                print('[search returned nothing]')
+                return False, 'the search came back empty'
+            return True, answer
         except Exception as e:
+            # The model only sees this as a failed tool result and rewords the
+            # question. Printing it is the only way to learn whether the
+            # search model is rate limited, unreachable, or something else.
+            print(f'[search failed: {e}]')
             return False, f'search failed: {e}'
 
     # ------------------------------------------------------------- history
@@ -398,6 +417,7 @@ class Brain:
         # times the tokens and return the same thing, so results are reused
         # within a turn and the model is told it already has them.
         self._seen = {}
+        self._failed = {}
         self.history.append({"role": "user", "content": text})
         self._trim()
         try:
