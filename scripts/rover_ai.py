@@ -395,14 +395,15 @@ class Brain:
     # -------------------------------------------------------------- search
 
     def search(self, question):
-        """Answer from the web, or say plainly that it could not.
+        """Delegate to a Groq Compound model, which has built-in web search.
 
-        compound runs its own search loop, so this is one call. It can also
-        answer from training data without searching and without saying so --
-        that is how it reported the 2026 World Cup as unplayed -- which no
-        field in the response distinguishes. The prompt below is the only
-        lever, and the caller is told not to fall back on memory when this
-        fails.
+        Compound cannot do local tool calling, so it cannot be the main model.
+        It is queried here as a plain one-shot question instead.
+
+        The system prompt says nothing about searching, deliberately. Telling
+        it to search made every question invoke the tool, and invoking the tool
+        is what returns 413 -- left to itself compound sometimes answers
+        without searching, which at least succeeds.
         """
         if not question.strip():
             return False, 'no question given'
@@ -411,23 +412,17 @@ class Brain:
                 model=SEARCH_MODEL,
                 messages=[
                     {"role": "system", "content":
-                     "Search for the answer. Reply in one or two short "
-                     "sentences of plain spoken English, no markdown or "
-                     "lists -- it will be read aloud. If you cannot find it, "
-                     "say so rather than answering from memory."},
+                     "Answer in one or two short sentences. Plain text only, "
+                     "no markdown or lists. It will be read aloud."},
                     {"role": "user", "content": question}],
                 max_tokens=300)
-            answer = (r.choices[0].message.content or '').strip()
+            return True, (r.choices[0].message.content or '').strip()
         except Exception as e:
-            # Only the model sees a failed tool result, and it responds by
-            # rewording the question. Printing it is how a 413 became a
-            # diagnosable problem rather than the rover being vague.
+            # Kept from the debugging: only the model sees a failed tool
+            # result, and it responds by rewording the question rather than
+            # reporting the problem. This is how the 413 became visible.
             print(f'[search failed: {e}]')
             return False, f'search failed: {e}'
-        if not answer:
-            print('[search returned nothing]')
-            return False, 'the search came back empty'
-        return True, answer[:600]
 
     # ------------------------------------------------------------- history
 
