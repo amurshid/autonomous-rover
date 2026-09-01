@@ -67,7 +67,10 @@ SYSTEM = (
     "If a step already speaks, reply with an empty string. Never announce "
     "completion: no \"Done\", \"Task completed\", \"Let me know if you "
     "need anything else\". The action is the answer. "
-    "Ask if a request is unclear or unsafe. Use ask_the_internet for current "
+    "Ask if a request is unclear or unsafe. Never spin, drive or go anywhere "
+    "unless the user asked you to move. A question you could not answer is "
+    "not a reason to move. "
+    "Use ask_the_internet for current "
     "events, weather, prices, or anything that may have changed. If that "
     "search fails, say you could not look it up. Do not answer from memory "
     "instead: you reached for the search because your own knowledge was too "
@@ -310,6 +313,15 @@ class Brain:
         """
         key = (name, json.dumps(args, sort_keys=True))
         movement = name in ('spin', 'drive', 'go_to_room', 'run_sequence')
+        # A failed lookup must never end in the rover driving. Asked for news,
+        # the search 413'd and the model called spin(90) -- nothing had asked
+        # it to move. Whatever its reasoning, a tool failure is not a reason to
+        # move, so movement is refused for the rest of that turn.
+        if movement and self._failed:
+            broke = ", ".join(sorted(self._failed))
+            print(f'  -> {name}({args})  [REFUSED: {broke} failed this turn]')
+            return False, ('not moving: something failed earlier in this '
+                           'request, so movement was not carried out')
         if not movement:
             # A failure is about the tool, not the phrasing. Rewording a
             # question the search could not answer just spends the request
