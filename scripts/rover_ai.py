@@ -7,7 +7,12 @@ Adds to the original: Nav2 room goals and optional voice in/out.
   python3 rover_ai.py --voice    # mic in, speaker out
   python3 rover_ai.py --voice --text   # both at once
 
-Requires GROQ_API_KEY. Voice mode also needs espeak-ng and alsa-utils.
+Requires GROQ_API_KEY for the model, speech-to-text and speech. Voice mode
+also needs espeak-ng and alsa-utils.
+
+Search is separate: ask_the_internet uses Gemini's Google Search grounding,
+which needs GEMINI_API_KEY and `pip3 install google-genai`. Without either,
+everything else still works and the rover says it cannot look things up.
 """
 
 import argparse
@@ -39,7 +44,11 @@ MODELS = [m.strip() for m in os.environ.get(
 if os.environ.get('ROVER_LLM_MODEL'):
     MODELS = [os.environ['ROVER_LLM_MODEL']]
 MODEL = MODELS[0]
-SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'groq/compound-mini')
+# Search moved to Gemini: groq/compound answered from stale training without
+# saying so, and later began returning 413 for a fifteen-token request.
+# Grounding reports whether a search actually ran, which is the part that
+# matters -- a confident wrong answer is worse than admitting ignorance.
+SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'gemini-3.5-flash-lite')
 MAX_HISTORY = 40  # messages kept after the system prompt. Every one is
                   # resent on every call, and a turn makes several -- but a
                   # shorter window costs "do it again" and "go back there",
@@ -166,6 +175,7 @@ class Brain:
         self.lock = threading.Lock()
         self._model_i = 0                   # index into MODELS
         self._seen = {}                     # tool results, this turn
+        self._gem = None                    # Gemini client, made on first use
         self._failed = {}                   # tools that failed, this turn
         self._seq = None                    # worker running a queued sequence
         self._seq_stop = threading.Event()  # set by stop / cancel_navigation
@@ -380,34 +390,58 @@ class Brain:
 
     # -------------------------------------------------------------- search
 
-    def search(self, question):
-        """Delegate to a Groq Compound model, which has built-in web search.
+    def _gemini(self):
+        """The search client, built on first use.
 
-        Compound cannot do local tool calling, so it cannot be the main model.
-        It is queried here as a plain one-shot question instead.
+        Imported here rather than at module scope so that a Pi without
+        google-genai still runs everything else -- only search is lost.
+        """
+        if self._gem is None:
+            from google import genai         # pip3 install google-genai
+            self._gem = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
+        return self._gem
+
+    def search(self, question):
+        """Answer from a live Google search, or admit that it could not.
+
+        Grounding returns the steps it took. A google_search_call step means a
+        search really ran; without one the model answered from training data,
+        which is precisely the failure this tool exists to avoid -- and the
+        previous search model did it silently, reporting that the 2026 World
+        Cup had not been played.
         """
         if not question.strip():
             return False, 'no question given'
         try:
-            r = self.client.chat.completions.create(
+            it = self._gemini().interactions.create(
                 model=SEARCH_MODEL,
-                messages=[
-                    {"role": "system", "content":
-                     "Answer in one or two short sentences. Plain text only, "
-                     "no markdown or lists. It will be read aloud."},
-                    {"role": "user", "content": question}],
-                max_tokens=300)
-            answer = (r.choices[0].message.content or '').strip()
-            if not answer:
-                print('[search returned nothing]')
-                return False, 'the search came back empty'
-            return True, answer
+                input=("Answer in one or two short sentences, plain spoken "
+                       "English, no markdown or lists -- it will be read "
+                       f"aloud. Question: {question}"),
+                tools=[{"type": "google_search"}])
+        except KeyError:
+            print('[search unavailable: GEMINI_API_KEY is not set]')
+            return False, 'search is not configured'
+        except ImportError:
+            print('[search unavailable: pip3 install google-genai]')
+            return False, 'search is not installed'
         except Exception as e:
-            # The model only sees this as a failed tool result and rewords the
-            # question. Printing it is the only way to learn whether the
-            # search model is rate limited, unreachable, or something else.
             print(f'[search failed: {e}]')
             return False, f'search failed: {e}'
+
+        steps = getattr(it, 'steps', None) or []
+        queries = [q for st in steps if getattr(st, 'type', '') == 'google_search_call'
+                   for q in (getattr(st, 'arguments', {}) or {}).get('queries', [])]
+        answer = (getattr(it, 'output_text', '') or '').strip()
+
+        if not queries:
+            print('[search: answered without searching -- not trusting it]')
+            return False, ('could not check this against a live search, so do '
+                           'not answer from memory')
+        print(f'[searched: {"; ".join(queries)}]')
+        if not answer:
+            return False, 'the search came back empty'
+        return True, answer[:600]
 
     # ------------------------------------------------------------- history
 
