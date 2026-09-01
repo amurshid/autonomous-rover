@@ -159,6 +159,7 @@ class Brain:
         self.history = [{"role": "system", "content": SYSTEM}]
         self.lock = threading.Lock()
         self._model_i = 0                   # index into MODELS
+        self._seen = {}                     # tool results, this turn
         self._seq = None                    # worker running a queued sequence
         self._seq_stop = threading.Event()  # set by stop / cancel_navigation
         # The worker must not speak before this turn's reply does. say() is a
@@ -298,6 +299,22 @@ class Brain:
 
     # ------------------------------------------------------------ dispatch
 
+    def _dispatch_once(self, name, args):
+        """dispatch(), but a repeat within the same turn reuses the answer.
+
+        Movement is exempt: "spin 90 twice" is two spins, not one.
+        """
+        key = (name, json.dumps(args, sort_keys=True))
+        if name not in ('spin', 'drive', 'go_to_room', 'run_sequence') \
+                and key in self._seen:
+            print(f'  -> {name}({args})  [already asked this turn]')
+            ok, result = self._seen[key]
+            return ok, result
+        print(f'  -> {name}({args})')
+        ok, result = self.dispatch(name, args)
+        self._seen[key] = (ok, result)
+        return ok, result
+
     def dispatch(self, name, args):
         # Manual motion and Nav2 both publish /cmd_vel. Never let them overlap.
         if name in ('spin', 'drive') and self.nav.is_navigating():
@@ -376,6 +393,11 @@ class Brain:
             return self._ask(text)
 
     def _ask(self, text):
+        # A model that is unhappy with a tool's answer tends to call it again
+        # with the question reworded. Three identical searches cost three
+        # times the tokens and return the same thing, so results are reused
+        # within a turn and the model is told it already has them.
+        self._seen = {}
         self.history.append({"role": "user", "content": text})
         self._trim()
         try:
@@ -398,17 +420,22 @@ class Brain:
                 args = json.loads(c.function.arguments or '{}')
             except json.JSONDecodeError:
                 args = {}
-            print(f'  -> {c.function.name}({args})')
-            ok, result = self.dispatch(c.function.name, args)
+            ok, result = self._dispatch_once(c.function.name, args)
             self.history.append({
                 "role": "tool", "tool_call_id": c.id,
                 "content": json.dumps({"ok": ok, "result": result})})
 
         for _ in range(3):          # allow a few chained tool calls
             try:
+                # 100 was chosen for a one-sentence reply, but gpt-oss
+                # spends tokens on reasoning that count against the same
+                # ceiling, so the visible answer was being cut off before it
+                # started -- and a truncated turn sends the loop round to
+                # call the same tool again. The prompt caps the reply's
+                # length; this only has to stop a runaway.
                 r2 = self._complete(
                     messages=self.history,
-                    tools=TOOLS, tool_choice="auto", max_tokens=100)
+                    tools=TOOLS, tool_choice="auto", max_tokens=400)
             except Exception as e:
                 print(f'[reply failed: {e}]')
                 return 'Sorry, something went wrong.'
@@ -433,8 +460,7 @@ class Brain:
                     a = json.loads(c.function.arguments or '{}')
                 except json.JSONDecodeError:
                     a = {}
-                print(f'  -> {c.function.name}({a})')
-                ok, result = self.dispatch(c.function.name, a)
+                ok, result = self._dispatch_once(c.function.name, a)
                 self.history.append({
                     "role": "tool", "tool_call_id": c.id,
                     "content": json.dumps({"ok": ok, "result": result})})
