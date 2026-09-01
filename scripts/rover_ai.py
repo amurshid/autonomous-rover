@@ -49,12 +49,14 @@ MODEL = MODELS[0]
 # gives its 3-series models no search-grounding quota and 404s the 2.5 models
 # for new keys, and Claude's web search is a paid API.
 #
-# compound-mini's own limits are not independent -- Groq derives them from the
-# models it is built on, which include gpt-oss-120b, the first entry in MODELS
-# above. So the conversation and the search draw on one bucket, and MODELS[1]
-# being gpt-oss-20b means the first failover may not separate them either. If
-# search keeps failing while the rover is talkative, reordering MODELS to put
-# a qwen first leaves the gpt-oss budget to search.
+# compound's search is broken server-side, so ask_the_internet fails and the
+# rover says it could not look something up. Eliminated, in order: payload
+# size (a 15-token curl fails), the SDK (curl reproduces it), the key and the
+# model ID (both come from /v1/models, and gpt-oss answers on the same key),
+# quota (0 tokens metered, 2 requests against a 30/min limit), and the chat
+# model sharing compound's substrate (pinning chat to qwen changes nothing).
+# It answers fine when a question needs no search, and 413s when it invokes
+# the tool.
 SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'groq/compound-mini')
 
 MAX_HISTORY = 40  # messages kept after the system prompt. Every one is
