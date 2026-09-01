@@ -685,6 +685,11 @@ def main():
             motions.do_stop()
         if voice:
             voice.close()
+        # Stop the executor before the nodes it holds. Left spinning, the C++
+        # layer under rclpy aborts as the nodes are destroyed beneath it --
+        # "terminate called without an active exception", core dumped, on
+        # every Ctrl-C.
+        ex.shutdown()
         motions.destroy_node()
         nav.destroy_node()
         # rclpy's SIGTERM handler has already shut the context down by
