@@ -18,6 +18,7 @@ from memory -- everything else keeps working.
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -441,6 +442,23 @@ class Brain:
 
     # ----------------------------------------------------------------- ask
 
+    @staticmethod
+    def _collapse(text):
+        """Drop a sentence the model repeated back to back.
+
+        Small models restate themselves, and raising max_tokens to 400 gave
+        them room to -- at 100 the repeat was simply cut off. Reading "I could
+        not look that up" aloud twice sounds broken, so identical neighbouring
+        sentences are collapsed. Deliberate repetition ("go, go!") survives:
+        only exact neighbours are dropped.
+        """
+        parts = [p for p in re.split(r'(?<=[.!?])\s*', (text or '').strip()) if p]
+        out = []
+        for part in parts:
+            if not out or part != out[-1]:
+                out.append(part)
+        return ' '.join(out)
+
     def ask(self, text):
         with self.lock:
             return self._ask(text)
@@ -467,7 +485,7 @@ class Brain:
 
         calls = msg.tool_calls or []
         if not calls:
-            return msg.content or '(no reply)'
+            return self._collapse(msg.content or '(no reply)')
 
         for c in calls:
             try:
@@ -508,7 +526,7 @@ class Brain:
                 # here made the rover announce the completion of every task it
                 # had just narrated.
                 reply = m2.content or ''
-                return reply
+                return self._collapse(reply)
             for c in more:
                 try:
                     a = json.loads(c.function.arguments or '{}')
