@@ -48,7 +48,11 @@ MODEL = MODELS[0]
 # saying so, and later began returning 413 for a fifteen-token request.
 # Grounding reports whether a search actually ran, which is the part that
 # matters -- a confident wrong answer is worse than admitting ignorance.
-SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'gemini-3.5-flash-lite')
+# A 2.5 model on purpose. The free tier grants 1,500 search-grounding calls a
+# day to Gemini 2 and 2.5, and zero to Gemini 3 -- a 3-series model 429s on its
+# first search however fresh the key is. The model's own 20 requests/day is
+# what binds here, not the grounding allowance.
+SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'gemini-2.5-flash')
 MAX_HISTORY = 40  # messages kept after the system prompt. Every one is
                   # resent on every call, and a turn makes several -- but a
                   # shorter window costs "do it again" and "go back there",
