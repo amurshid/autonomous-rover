@@ -45,13 +45,16 @@ MODELS = [m.strip() for m in os.environ.get(
 if os.environ.get('ROVER_LLM_MODEL'):
     MODELS = [os.environ['ROVER_LLM_MODEL']]
 MODEL = MODELS[0]
-# Search stays on Groq. Gemini's free tier gives Gemini 3 models no
-# search-grounding
-# quota at all and closes the 2.5 models to new keys, so grounding there needs
-# billing -- as does every other option. compound answered correctly earlier in
-# the day and only began returning 413 once gpt-oss-120b's tokens ran out,
-# which may be a quota surfacing under the wrong status code rather than a
-# fault. Costs nothing to find out.
+# Search stays on Groq. Every alternative needs billing: Gemini's free tier
+# gives its 3-series models no search-grounding quota and 404s the 2.5 models
+# for new keys, and Claude's web search is a paid API.
+#
+# compound-mini's own limits are not independent -- Groq derives them from the
+# models it is built on, which include gpt-oss-120b, the first entry in MODELS
+# above. So the conversation and the search draw on one bucket, and MODELS[1]
+# being gpt-oss-20b means the first failover may not separate them either. If
+# search keeps failing while the rover is talkative, reordering MODELS to put
+# a qwen first leaves the gpt-oss budget to search.
 SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'groq/compound-mini')
 
 MAX_HISTORY = 40  # messages kept after the system prompt. Every one is
@@ -285,8 +288,18 @@ class Brain:
 
     @staticmethod
     def _is_rate_limit(e):
-        return getattr(e, 'status_code', None) == 429 or \
-            'rate_limit_exceeded' in str(e) or 'Rate limit reached' in str(e)
+        """Groq reports a rate limit as 429 or, for tokens per minute, as 413.
+
+        "Request Entity Too Large" is not always about bytes: exceeding TPM
+        arrives as 413 with "Request too large for model X ... on tokens per
+        minute (TPM): Limit N, Requested M". Treating that as a transient
+        error means three retries 0.6s apart against a per-minute window --
+        far too soon to help, and the model never switches.
+        """
+        code = getattr(e, 'status_code', None)
+        text = str(e)
+        return code in (429, 413) or 'rate_limit_exceeded' in text \
+            or 'Rate limit reached' in text or 'Request too large' in text
 
     def _complete(self, **kw):
         """Call the LLM, moving to the next model when one is out of tokens.
@@ -418,10 +431,14 @@ class Brain:
                 max_tokens=300)
             return True, (r.choices[0].message.content or '').strip()
         except Exception as e:
-            # Kept from the debugging: only the model sees a failed tool
-            # result, and it responds by rewording the question rather than
-            # reporting the problem. This is how the 413 became visible.
-            print(f'[search failed: {e}]')
+            # The full body, not just str(e): a TPM rejection names the model
+            # and quotes "Limit N, Requested M", which says whether the bucket
+            # was empty or this one request was too big. Only the model sees a
+            # failed tool result, and it responds by rewording the question
+            # rather than reporting the problem.
+            code = getattr(e, 'status_code', '?')
+            body = getattr(e, 'body', None)
+            print(f'[search failed: HTTP {code} {body if body else e}]')
             return False, f'search failed: {e}'
 
     # ------------------------------------------------------------- history
