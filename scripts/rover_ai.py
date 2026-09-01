@@ -10,9 +10,9 @@ Adds to the original: Nav2 room goals and optional voice in/out.
 Requires GROQ_API_KEY for the model, speech-to-text and speech. Voice mode
 also needs espeak-ng and alsa-utils.
 
-Search uses groq/compound-mini, which has its own daily allowance. When it
-fails the rover says it could not look something up rather than answering
-from memory -- everything else keeps working.
+Search uses Tavily and needs TAVILY_API_KEY -- 1,000 free searches a month,
+no card. Without the key the rover says it cannot look things up and
+everything else keeps working.
 """
 
 import argparse
@@ -22,6 +22,8 @@ import re
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import rclpy
 from rclpy.executors import (ExternalShutdownException,
@@ -45,19 +47,14 @@ MODELS = [m.strip() for m in os.environ.get(
 if os.environ.get('ROVER_LLM_MODEL'):
     MODELS = [os.environ['ROVER_LLM_MODEL']]
 MODEL = MODELS[0]
-# Search stays on Groq. Every alternative needs billing: Gemini's free tier
-# gives its 3-series models no search-grounding quota and 404s the 2.5 models
-# for new keys, and Claude's web search is a paid API.
-#
-# compound's search is broken server-side, so ask_the_internet fails and the
-# rover says it could not look something up. Eliminated, in order: payload
-# size (a 15-token curl fails), the SDK (curl reproduces it), the key and the
-# model ID (both come from /v1/models, and gpt-oss answers on the same key),
-# quota (0 tokens metered, 2 requests against a 30/min limit), and the chat
-# model sharing compound's substrate (pinning chat to qwen changes nothing).
-# It answers fine when a question needs no search, and 413s when it invokes
-# the tool.
-SEARCH_MODEL = os.environ.get('ROVER_SEARCH_MODEL', 'groq/compound-mini')
+# Search runs on Tavily. Groq's compound models 413 whenever they invoke
+# their search tool -- reproduced with curl, 0 tokens metered, and unaffected
+# by which chat model is running -- so it is broken on their side, not ours.
+# Gemini's grounding and Claude's web search both need a billing account;
+# Tavily gives 1,000 searches a month with no card, which at a basic search
+# per credit is about 33 a day.
+SEARCH_URL = 'https://api.tavily.com/search'
+SEARCH_RESULTS = 5
 
 MAX_HISTORY = 40  # messages kept after the system prompt. Every one is
                   # resent on every call, and a turn makes several -- but a
@@ -410,38 +407,72 @@ class Brain:
     # -------------------------------------------------------------- search
 
     def search(self, question):
-        """Delegate to a Groq Compound model, which has built-in web search.
+        """Answer from a live web search, or say plainly that it could not.
 
-        Compound cannot do local tool calling, so it cannot be the main model.
-        It is queried here as a plain one-shot question instead.
+        Tavily returns both a short synthesised answer and the snippets it was
+        built from. The snippets are the point: retrieval happens on our side
+        of the line, so "found nothing" is a fact we can see rather than
+        something the model reports or quietly papers over. Groq's compound
+        gave neither -- it once reported the 2026 World Cup as unplayed, with
+        no error and no way to tell it had not searched.
 
-        The system prompt says nothing about searching, deliberately. Telling
-        it to search made every question invoke the tool, and invoking the tool
-        is what returns 413 -- left to itself compound sometimes answers
-        without searching, which at least succeeds.
+        Raw urllib rather than the SDK: this runs under system python
+        alongside ROS, and one fewer package to keep current there is worth
+        more than the convenience.
         """
         if not question.strip():
             return False, 'no question given'
+        key = os.environ.get('TAVILY_API_KEY')
+        if not key:
+            print('[search unavailable: TAVILY_API_KEY is not set]')
+            return False, 'search is not configured'
+
+        # basic costs one credit; advanced costs two and buys depth that a
+        # one-sentence spoken reply cannot carry.
+        body = json.dumps({
+            'query': question,
+            'search_depth': 'basic',
+            'max_results': SEARCH_RESULTS,
+            'include_answer': True,
+        }).encode()
+        req = urllib.request.Request(
+            SEARCH_URL, data=body,
+            headers={'Content-Type': 'application/json',
+                     'Authorization': f'Bearer {key}'})
         try:
-            r = self.client.chat.completions.create(
-                model=SEARCH_MODEL,
-                messages=[
-                    {"role": "system", "content":
-                     "Answer in one or two short sentences. Plain text only, "
-                     "no markdown or lists. It will be read aloud."},
-                    {"role": "user", "content": question}],
-                max_tokens=300)
-            return True, (r.choices[0].message.content or '').strip()
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors='replace')[:200]
+            print(f'[search failed: HTTP {e.code} {detail}]')
+            return False, f'search failed: HTTP {e.code}'
         except Exception as e:
-            # The full body, not just str(e): a TPM rejection names the model
-            # and quotes "Limit N, Requested M", which says whether the bucket
-            # was empty or this one request was too big. Only the model sees a
-            # failed tool result, and it responds by rewording the question
-            # rather than reporting the problem.
-            code = getattr(e, 'status_code', '?')
-            body = getattr(e, 'body', None)
-            print(f'[search failed: HTTP {code} {body if body else e}]')
+            # Only the model sees a failed tool result, and it responds by
+            # rewording the question rather than reporting the problem.
+            print(f'[search failed: {e}]')
             return False, f'search failed: {e}'
+
+        results = data.get('results') or []
+        answer = (data.get('answer') or '').strip()
+        if not results and not answer:
+            print('[search found nothing]')
+            return False, 'the search found nothing'
+
+        hosts = []
+        for r in results[:3]:
+            u = r.get('url') or ''
+            host = u.split('/')[2] if u.count('/') > 2 else u
+            if host and host not in hosts:
+                hosts.append(host)
+        print(f'[searched: {len(results)} results'
+              + (f' from {", ".join(hosts)}' if hosts else '') + ']')
+
+        if answer:
+            return True, answer[:600]
+        # No synthesised answer: hand over the snippets and let the model
+        # write the sentence.
+        text = ' '.join((r.get('content') or '').strip() for r in results[:3])
+        return True, text[:900] or 'the search found nothing usable'
 
     # ------------------------------------------------------------- history
 
