@@ -32,5 +32,8 @@ ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
 SuccessExitStatus=2 3
 TimeoutStartSec=180
 
+# Deliberately not WantedBy anything: the camera relocaliser is out of the
+# deployment. It still works -- "systemctl start rover-relocalise" whenever
+# Cartographer is up, or run vpr_relocalise.py by hand -- and putting it back
+# in the boot means restoring this line and re-enabling the unit.
 [Install]
-WantedBy=rover.target

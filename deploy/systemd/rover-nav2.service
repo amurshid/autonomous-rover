@@ -1,6 +1,11 @@
 [Unit]
 Description=Nav2 navigation stack
-After=rover-relocalise.service
+# Nothing gates this on a good pose any more: without the relocaliser,
+# Cartographer works out where it is on its own and takes about a minute
+# over it. Nav2 coming up early is harmless -- it does nothing until given
+# a goal -- but a goal sent in that first minute is planned from a pose
+# Cartographer has not settled yet.
+After=rover-initialpose.service
 Requires=rover-cartographer.service rover-bridge.service
 
 # WantedBy only starts; PartOf is what makes "systemctl stop

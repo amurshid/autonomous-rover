@@ -74,9 +74,9 @@ MODES = {
         "blurb": "Finds itself, drives itself, listens for commands.",
         "units": ["rover-bridge", "rover-camera", "rover-lidar",
                   "rover-cartographer", "rover-initialpose",
-                  "rover-relocalise", "rover-nav2", "rover-ai"],
+                  "rover-nav2", "rover-ai"],
         "steps": ["Motors", "Camera", "Lidar", "Map", "Pose bridge",
-                  "Finding itself", "Navigation", "Voice"],
+                  "Navigation", "Voice"],
     },
     "teleop": {
         "target": "rover-teleop.target",
