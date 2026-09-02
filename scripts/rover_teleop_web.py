@@ -14,74 +14,157 @@ from sensor_msgs.msg import Image
 from PIL import Image as PILImage
 
 PAGE = """<!DOCTYPE html><html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Rover Control</title><style>
 *{box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
 body{margin:0;background:#12141a;color:#e6e8ee;font-family:system-ui,sans-serif;
-display:flex;flex-direction:column;align-items:center;padding:16px}
+display:flex;flex-direction:column;align-items:center;padding:16px;overscroll-behavior:none}
 h2{margin:4px 0 12px;font-weight:600;font-size:18px}
-.cam{position:relative;width:100%;max-width:420px;aspect-ratio:4/3;background:#000;
-border:1px solid #333a4d;border-radius:12px;overflow:hidden;margin-bottom:14px;
+#hint{display:none;font-size:12px;color:#9aa3b8;margin-bottom:10px}
+@media (orientation:portrait) and (hover:none){#hint{display:block}}
+
+/* Desktop and phone-portrait: camera on top, D-pad below. */
+#app{display:grid;gap:10px;width:100%;max-width:420px;
+grid-template-columns:1fr 88px 1fr;justify-items:center;align-items:center;
+grid-template-areas:"cam cam cam" "tog tog tog" ".  up  ." "lt stop rt"
+                    ".  dn  ." "s1 s1 s1" "s2 s2 s2" "st st st"}
+#lpad,#rpad,#mid,#bar{display:contents}
+.cam{grid-area:cam}#camtog{grid-area:tog}#up{grid-area:up}#dn{grid-area:dn}
+#lt{grid-area:lt;justify-self:end}#rt{grid-area:rt;justify-self:start}
+#stop{grid-area:stop}#s1{grid-area:s1}#s2{grid-area:s2}#st{grid-area:st}
+
+.cam{position:relative;width:100%;aspect-ratio:4/3;background:#000;
+border:1px solid #333a4d;border-radius:12px;overflow:hidden;
 display:flex;align-items:center;justify-content:center}
 .cam img{width:100%;height:100%;object-fit:contain;display:block}
 #camsg{position:absolute;font-size:13px;color:#9aa3b8}
-#camtog{background:none;border:none;color:#9aa3b8;font-size:12px;padding:0 0 12px}
-.pad{display:grid;grid-template-columns:repeat(3,88px);grid-template-rows:repeat(3,88px);gap:10px}
+#camtog{background:none;border:none;color:#9aa3b8;font-size:12px;padding:0}
 button{background:#232735;color:#e6e8ee;border:1px solid #333a4d;border-radius:14px;
 font-size:26px;touch-action:none;transition:background .08s}
 button:active,button.on{background:#2f6fd0;border-color:#4a86e8}
-#stop{background:#7a2230;border-color:#a03446;font-size:16px;font-weight:600}
+#up,#dn,#lt,#rt{width:88px;height:88px}
+#stop{width:88px;height:88px;background:#7a2230;border-color:#a03446;
+font-size:16px;font-weight:600}
 #stop:active{background:#a83a4c}
-.sl{width:280px;margin-top:20px}
+.sl{width:280px}
+#s1{margin-top:10px}
 input[type=range]{width:100%}
 .lab{display:flex;justify-content:space-between;font-size:13px;color:#9aa3b8;margin-bottom:4px}
-#st{margin-top:16px;font-size:13px;color:#9aa3b8;font-variant-numeric:tabular-nums}
-</style></head><body>
+#st{font-size:13px;color:#9aa3b8;font-variant-numeric:tabular-nums}
+
+/* Phone held sideways: a gamepad. Turning under the left thumb, throttle under
+   the right, camera filling everything between them. The class is set from a
+   media query in the head, so a laptop window is never demoted to this. */
+.game body{height:100dvh;overflow:hidden;
+padding:8px calc(8px + env(safe-area-inset-right))
+        calc(8px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left))}
+.game h2,.game #hint{display:none}
+.game #app{display:flex;flex-direction:row;align-items:center;gap:10px;
+max-width:none;height:100%;touch-action:none}
+.game #lpad{display:flex;flex-direction:row;gap:10px}
+.game #rpad{display:flex;flex-direction:column;gap:10px}
+/* column-reverse puts the slider strip above the video: the band along the
+   bottom of a phone belongs to the home indicator, where a slider is either
+   unusable or a swipe out of the app. */
+.game #mid{display:flex;flex-direction:column-reverse;flex:1;min-width:0;height:100%;gap:6px}
+.game .cam{flex:1;min-height:0;aspect-ratio:auto}
+.game #bar{display:flex;align-items:center;gap:10px;width:100%}
+.game #up,.game #dn,.game #lt,.game #rt{width:84px;height:84px;font-size:28px}
+.game #stop{flex:none;width:84px;height:46px;font-size:14px}
+.game .sl{flex:1;width:auto;min-width:90px;margin:0}
+.game .lab{font-size:11px;margin-bottom:2px}
+/* The bar is only as wide as the phone minus two thumbs, so the two readouts
+   float in the bottom corners instead of crowding the sliders down to a width
+   nobody can aim at. The corners are outside the home indicator, which sits
+   centred. */
+.game #camtog,.game #st{position:fixed;z-index:2;font-size:11px;white-space:nowrap;
+background:rgba(18,20,26,.66);border-radius:6px;padding:3px 6px;
+bottom:calc(6px + env(safe-area-inset-bottom))}
+.game #camtog{left:calc(8px + env(safe-area-inset-left))}
+.game #st{right:calc(8px + env(safe-area-inset-right));min-width:0;text-align:right}
+</style>
+<script>
+// Set before first paint so the layout never visibly rearranges. ?layout=game
+// or ?layout=desk forces one, which is also how this gets checked on a desktop.
+(function(){
+  var q=new URLSearchParams(location.search).get('layout'),
+      mq=matchMedia('(orientation:landscape) and (max-height:600px) and (hover:none)');
+  function set(){document.documentElement.classList.toggle('game',q?q==='game':mq.matches)}
+  if(mq.addEventListener)mq.addEventListener('change',set);else mq.addListener(set);
+  addEventListener('orientationchange',set); set();
+})();
+</script></head><body>
 <h2>Rover Control</h2>
-<div class="cam"><img id="cam" alt=""><div id="camsg">connecting camera</div></div>
-<button id="camtog">turn camera off</button>
-<div class="pad">
-  <div></div><button data-l="1" data-a="0">&#9650;</button><div></div>
-  <button data-l="0" data-a="1">&#9664;</button>
-  <button id="stop">STOP</button>
-  <button data-l="0" data-a="-1">&#9654;</button>
-  <div></div><button data-l="-1" data-a="0">&#9660;</button><div></div>
+<div id="hint">turn your phone sideways for gamepad controls</div>
+<div id="app">
+  <div id="lpad">
+    <button id="lt" data-l="0" data-a="1">&#9664;</button>
+    <button id="rt" data-l="0" data-a="-1">&#9654;</button>
+  </div>
+  <div id="mid">
+    <div class="cam"><img id="cam" alt=""><div id="camsg">connecting camera</div></div>
+    <div id="bar">
+      <div class="sl" id="s1"><div class="lab"><span>Speed</span><span id="sv">0.50</span></div>
+      <input id="spd" type="range" min="0.1" max="1.2" step="0.05" value="0.5"></div>
+      <div class="sl" id="s2"><div class="lab"><span>Turn rate</span><span id="tv">6.00</span></div>
+      <input id="trn" type="range" min="1" max="16" step="0.5" value="6"></div>
+      <button id="stop">STOP</button>
+      <button id="camtog">turn camera off</button>
+      <div id="st">idle</div>
+    </div>
+  </div>
+  <div id="rpad">
+    <button id="up" data-l="1" data-a="0">&#9650;</button>
+    <button id="dn" data-l="-1" data-a="0">&#9660;</button>
+  </div>
 </div>
-<div class="sl"><div class="lab"><span>Speed</span><span id="sv">0.50</span></div>
-<input id="spd" type="range" min="0.1" max="1.2" step="0.05" value="0.5"></div>
-<div class="sl"><div class="lab"><span>Turn rate</span><span id="tv">1.00</span></div>
-<input id="trn" type="range" min="1" max="16" step="0.5" value="6"></div>
-<div id="st">idle</div>
 <script>
 const spd=document.getElementById('spd'),trn=document.getElementById('trn'),
       st=document.getElementById('st'),sv=document.getElementById('sv'),tv=document.getElementById('tv');
 spd.oninput=()=>sv.textContent=(+spd.value).toFixed(2);
 trn.oninput=()=>tv.textContent=(+trn.value).toFixed(2);
-let cur=null,timer=null;
+
+// Directions are summed over everything held rather than replaced by the last
+// press: on the gamepad layout each thumb owns a pad, and forward-plus-turn is
+// how the rover drives an arc. Opposing presses cancel, which is also correct.
+const held=new Map();
+let timer=null;
 function send(l,a){
   fetch(`/cmd?lin=${l}&ang=${a}`).catch(()=>st.textContent='connection lost');
   st.textContent=(l||a)?`lin ${l.toFixed(2)}  ang ${a.toFixed(2)}`:'stopped';
 }
-function start(dl,da){
-  if(timer)clearInterval(timer);
-  cur={dl,da};
-  const tick=()=>send(dl*(+spd.value),da*(+trn.value));
-  tick(); timer=setInterval(tick,120);
+function push(){
+  let l=0,a=0;
+  held.forEach(v=>{l+=v[0];a+=v[1]});
+  l=Math.max(-1,Math.min(1,l)); a=Math.max(-1,Math.min(1,a));
+  send(l*(+spd.value),a*(+trn.value));
 }
-function stop(){ if(timer)clearInterval(timer); timer=null; cur=null; send(0,0); }
+function refresh(){
+  push();
+  if(held.size&&!timer) timer=setInterval(push,120);
+  else if(!held.size&&timer){clearInterval(timer);timer=null}
+}
+function hold(k,v){held.set(k,v);refresh()}
+function release(k){if(held.delete(k))refresh()}
+function allStop(){
+  held.clear();
+  if(timer){clearInterval(timer);timer=null}
+  document.querySelectorAll('button[data-l]').forEach(b=>b.classList.remove('on'));
+  send(0,0);
+}
 document.querySelectorAll('button[data-l]').forEach(b=>{
-  const dl=+b.dataset.l, da=+b.dataset.a;
-  b.addEventListener('pointerdown',e=>{e.preventDefault();b.classList.add('on');start(dl,da)});
+  const v=[+b.dataset.l,+b.dataset.a];
+  b.addEventListener('pointerdown',e=>{e.preventDefault();b.classList.add('on');hold(b,v)});
   ['pointerup','pointerleave','pointercancel'].forEach(ev=>
-    b.addEventListener(ev,()=>{b.classList.remove('on');stop()}));
+    b.addEventListener(ev,()=>{b.classList.remove('on');release(b)}));
 });
-document.getElementById('stop').addEventListener('pointerdown',e=>{e.preventDefault();stop()});
+document.getElementById('stop').addEventListener('pointerdown',e=>{e.preventDefault();allStop()});
 const KEYS={ArrowUp:[1,0],w:[1,0],ArrowDown:[-1,0],s:[-1,0],
              ArrowLeft:[0,1],a:[0,1],ArrowRight:[0,-1],d:[0,-1]};
-let held=null;
-addEventListener('keydown',e=>{const k=KEYS[e.key];if(k&&held!==e.key){held=e.key;start(k[0],k[1])}});
-addEventListener('keyup',e=>{if(held===e.key){held=null;stop()}});
-addEventListener('blur',stop);
+addEventListener('keydown',e=>{const k=KEYS[e.key];if(k&&!held.has(e.key))hold(e.key,k)});
+addEventListener('keyup',e=>release(e.key));
+addEventListener('blur',allStop);
 
 // Camera. /stream is one long multipart response, which is cheap and low
 // latency where it works; some mobile browsers never render it, so a frame
@@ -90,7 +173,7 @@ addEventListener('blur',stop);
 const cam=document.getElementById('cam'),camsg=document.getElementById('camsg'),
       camtog=document.getElementById('camtog');
 let camOn=true,poll=null,watchdog=null,gotFrame=false;
-function msg(t){ camsg.textContent=t; camsg.style.display=t?'':'none'; }
+function msg(t){camsg.textContent=t;camsg.style.display=t?'':'none'}
 function camStop(){
   if(poll){clearInterval(poll);poll=null}
   if(watchdog){clearTimeout(watchdog);watchdog=null}
@@ -100,28 +183,28 @@ function camStop(){
 function camStart(){
   camStop(); msg('connecting camera');
   cam.src='/stream?'+Date.now();
-  watchdog=setTimeout(()=>{ if(!gotFrame&&camOn) camPoll(); },4000);
+  watchdog=setTimeout(()=>{if(!gotFrame&&camOn)camPoll()},4000);
 }
 function camPoll(){
   if(poll)return;
   cam.removeAttribute('src');
-  poll=setInterval(()=>{ if(!document.hidden) cam.src='/snapshot.jpg?'+Date.now(); },150);
+  poll=setInterval(()=>{if(!document.hidden)cam.src='/snapshot.jpg?'+Date.now()},150);
 }
 cam.addEventListener('load',()=>{gotFrame=true;msg('')});
 cam.addEventListener('error',()=>{
   if(!camOn)return;
-  if(poll){ msg('camera unavailable'); }        // polling already retrying
-  else { clearTimeout(watchdog); camPoll(); }
+  if(poll){msg('camera unavailable')}          // polling already retrying
+  else{clearTimeout(watchdog);camPoll()}
 });
 camtog.onclick=()=>{
   camOn=!camOn;
   camtog.textContent=camOn?'turn camera off':'turn camera on';
-  if(camOn) camStart(); else { camStop(); msg('camera off'); }
+  if(camOn)camStart(); else{camStop();msg('camera off')}
 };
 // A backgrounded tab holding the stream open keeps the Pi encoding for nobody.
 addEventListener('visibilitychange',()=>{
-  if(document.hidden) camStop();
-  else if(camOn) camStart();
+  if(document.hidden)camStop();
+  else if(camOn)camStart();
 });
 camStart();
 </script></body></html>"""
