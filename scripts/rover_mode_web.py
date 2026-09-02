@@ -11,9 +11,14 @@ Switching is two systemd targets with Conflicts= between them, so starting
 either stops the other. That is a one-line operation over SSH and no use at all
 to someone holding a phone, which is what this serves.
 
+In autonomous mode it also lists the rooms, so a phone can send the rover
+somewhere without saying a word to it.
+
 Runs in both modes -- it is the one thing that must never go down, or there is
 no way back. Needs no ROS: it only reads systemctl and starts targets, through
-a sudoers rule limited to exactly those commands.
+a sudoers rule limited to exactly those commands. Sending a goal does need ROS,
+so that half runs as a subprocess (rover_nav.py --json) and this process stays
+free of rclpy.
 
     python3 rover_mode_web.py            # port 80, or $ROVER_MODE_PORT
 """
@@ -22,10 +27,43 @@ import json
 import os
 import socket
 import subprocess
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("ROVER_MODE_PORT", "80"))
 TELEOP_PORT = int(os.environ.get("ROVER_TELEOP_PORT", "8080"))
+
+# rooms.py is the single source of truth for the goal poses and needs no ROS
+# itself, so importing it here costs nothing. If it is missing the page must
+# still come up: losing the room buttons is survivable, losing the mode
+# switcher is not.
+try:
+    from rooms import ROOM_NAMES, ROOMS, spoken_name
+except Exception:
+    ROOMS, ROOM_NAMES = {}, []
+
+    def spoken_name(room):
+        return room
+
+# How to run rover_nav.py. A login shell because the ROS setup scripts assume
+# one, and `exec` because the child must be the process this server signals --
+# a wrapping bash would swallow the SIGTERM that cancels the goal. The room
+# arrives as $1 rather than interpolated into the command, so nothing about it
+# reaches the shell as syntax.
+NAV_CMD = os.environ.get("ROVER_NAV_CMD") or (
+    "source /opt/ros/humble/setup.bash && "
+    "source \"$HOME/ros2_ws/install/setup.bash\" && "
+    "exec python3 -u \"$HOME/rover_nav.py\" --json \"$1\""
+)
+
+
+def room_label(room):
+    """'breakfast_table' -> 'Breakfast table'; 'bedroom_1' -> "bedroom 1"."""
+    name = spoken_name(room)
+    if name.startswith("the "):
+        name = name[4:]
+    return name[:1].upper() + name[1:]
+
 
 # Order matters: the page shows these as a checklist, and reading it top to
 # bottom should match what actually comes up.
@@ -89,9 +127,123 @@ def teleop_answering():
         return False
 
 
+class Navigator:
+    """The one goal in flight, as a child process being watched by one thread.
+
+    The page's whole contract with the user is that a room button is either
+    free or locked, so there is never more than one child: a second request
+    while one is running is refused rather than queued or made to preempt.
+
+    Terminal state is kept rather than cleared, so a phone picked up after the
+    fact still sees where the rover went and whether it got there.
+
+    The invariant the page depends on is that a locked button means a live
+    child. So the verdict is not published until the child has actually been
+    reaped: rover_nav.py says "cancelled" and then stays up another second and
+    a half getting that cancel to Nav2, and unlocking the buttons over the top
+    of that window is how you get a tap that is silently refused.
+    """
+
+    IDLE = {"room": None, "phase": "idle", "remaining": None, "detail": ""}
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._state = dict(self.IDLE)
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._state)
+
+    def go(self, room):
+        with self._lock:
+            if self._proc is not None:
+                return False, f"already driving to {self._state['room']}"
+            try:
+                proc = subprocess.Popen(
+                    ["bash", "-lc", NAV_CMD, "rover-nav", room],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1)
+            except Exception as e:
+                self._state = dict(self.IDLE, room=room, phase="failed",
+                                   detail=str(e))
+                return False, str(e)
+            self._proc = proc
+            self._state = dict(self.IDLE, room=room, phase="sending")
+        threading.Thread(target=self._watch, args=(proc,), daemon=True).start()
+        return True, f"navigating to {room}"
+
+    def stop(self):
+        """SIGTERM, which rover_nav.py turns into a Nav2 cancel before it exits.
+
+        Killing it outright would leave Nav2 driving to a goal with nobody
+        watching, which is the one outcome a stop button must not produce.
+        """
+        with self._lock:
+            proc = self._proc
+            if proc is None:
+                return False, "not navigating"
+            # Still locked, but no longer claiming to be on its way there.
+            self._state.update(phase="stopping", remaining=None)
+        try:
+            proc.terminate()
+        except Exception as e:
+            return False, str(e)
+        return True, "stopping"
+
+    def _watch(self, proc):
+        """Read the child's JSON stream to the end, then reap it."""
+        tail, verdict = "", None
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                # ROS logs to the same stream. Keep the last such line: if the
+                # child dies without a verdict it is the only clue there is.
+                tail = line
+                continue
+            with self._lock:
+                if self._proc is not proc:
+                    break
+                kind = ev.get("event")
+                if kind == "done":
+                    # Held, not published -- see the class docstring.
+                    verdict = (ev.get("outcome") or "failed",
+                               ev.get("detail") or "")
+                elif self._state["phase"] == "stopping":
+                    # A stop has landed. A line still in the pipe from before
+                    # it must not put the rover back on its way.
+                    pass
+                elif kind == "sent":
+                    self._state.update(phase="driving")
+                elif kind == "feedback":
+                    self._state.update(phase="driving",
+                                       remaining=ev.get("remaining"))
+        proc.wait()
+        with self._lock:
+            if self._proc is not proc:
+                return
+            self._proc = None
+            if verdict is None:
+                # Gone without a verdict -- ROS not sourced, nav2 down, killed.
+                # Say so, or the buttons stay locked on a goal nobody is
+                # pursuing.
+                verdict = ("failed",
+                           tail or f"rover_nav.py exited {proc.returncode}")
+            self._state.update(phase=verdict[0], detail=verdict[1],
+                               remaining=None)
+
+
+NAV = Navigator()
+
+
 def status():
     mode = current_mode()
-    out = {"mode": mode, "teleop_port": TELEOP_PORT, "units": {}}
+    out = {"mode": mode, "teleop_port": TELEOP_PORT, "nav": NAV.snapshot(),
+           "units": {}}
     for key, m in MODES.items():
         out["units"][key] = [unit_state(u) for u in m["units"]]
     ready = False
@@ -147,6 +299,42 @@ PAGE = """<!doctype html>
            text-transform:uppercase; letter-spacing:.09em; opacity:0; }
   .card[data-on="1"] .badge { opacity:1; }
 
+  /* ---- rooms, autonomous mode only ---- */
+  #rooms { margin-top:1.7rem; }
+  #rooms[hidden] { display:none; }
+  .rhead { display:flex; align-items:center; gap:.6rem; margin-bottom:.7rem; }
+  .rhead span { font-size:.7rem; color:var(--dim);
+                text-transform:uppercase; letter-spacing:.09em; }
+  #rstop { margin-left:auto; font:inherit; font-size:.75rem; font-weight:600;
+           color:#f8a3ae; background:#3a1c22; border:1px solid #6b2b36;
+           border-radius:8px; padding:.32rem .8rem; }
+  #rstop[hidden] { display:none; }
+
+  .grid { display:grid; grid-template-columns:repeat(2,1fr); gap:.55rem; }
+  .room {
+    display:flex; align-items:center; gap:.5rem; text-align:left;
+    background:var(--card); border:1px solid var(--edge); border-radius:11px;
+    color:var(--ink); font:inherit; font-size:.85rem; padding:.7rem .75rem;
+    min-height:3rem;
+    transition:border-color .18s, background .18s, opacity .18s, transform .12s;
+  }
+  .room:active { transform:scale(.98); }
+  .room:disabled { opacity:.3; }
+  /* The room it is driving to stays lit while every other one greys out --
+     one button held down is the whole signal that it is under way. */
+  .room.going, .room.here { opacity:1; }
+  .room.going { border-color:var(--accent); background:#11203a; }
+  .room.here  { border-color:var(--go);     background:#132218; }
+  .room .spin { display:none; width:.85rem; height:.85rem; flex:none;
+                border-radius:50%; border:2px solid var(--accent);
+                border-right-color:transparent; animation:spin .7s linear infinite; }
+  .room.going .spin { display:block; }
+  .dist { margin-left:auto; font-size:.7rem; color:var(--dim);
+          font-variant-numeric:tabular-nums; }
+  .rnote { margin:.85rem 0 0; color:var(--dim); font-size:.78rem;
+           min-height:1.2em; }
+  .rnote.bad { color:#f8a3ae; }
+
   /* ---- switching overlay ---- */
   .veil {
     position:fixed; inset:0; background:rgba(13,17,23,.96);
@@ -197,6 +385,13 @@ PAGE = """<!doctype html>
   <h1>Rover</h1>
   <p class="sub">Pick a mode.</p>
   <div id="cards"></div>
+
+  <div id="rooms" hidden>
+    <div class="rhead"><span>Send it to a room</span>
+      <button id="rstop" hidden>Stop</button></div>
+    <div class="grid" id="rgrid"></div>
+    <p class="rnote" id="rnote"></p>
+  </div>
 </div>
 
 <div class="veil" id="veil"><div class="panel">
@@ -208,7 +403,9 @@ PAGE = """<!doctype html>
 
 <script>
 const MODES = __MODES__;
-let busy = null;
+const ROOMS = __ROOMS__;          // [[key, label], ...] in a fixed order
+let busy = null;                  // mode being switched to
+let going = false;                // a room goal is in flight
 
 function card(key, m, on) {
   return `<div class="card" data-mode="${key}" data-on="${on ? 1 : 0}">
@@ -229,8 +426,85 @@ function paint(st) {
 async function poll() {
   try {
     const st = await (await fetch('/api/status')).json();
-    if (busy) progress(st); else paint(st);
+    if (busy) progress(st); else { paint(st); paintRooms(st); }
   } catch (e) { /* the server restarts during a switch; just retry */ }
+}
+
+/* ---------------------------------------------------------------- rooms */
+
+// Built once. Repainting these from innerHTML on every poll would drop the
+// tap highlight mid-press and restart the spinner four times a second.
+function buildRooms() {
+  document.getElementById('rgrid').innerHTML = ROOMS.map(([key, label]) =>
+    `<button class="room" data-room="${key}"><span class="spin"></span>` +
+    `<span>${label}</span><span class="dist"></span></button>`).join('');
+  document.querySelectorAll('.room').forEach(el =>
+    el.onclick = () => goRoom(el.dataset.room));
+  document.getElementById('rstop').onclick = () => {
+    document.getElementById('rnote').textContent = 'Stopping...';
+    fetch('/api/nav/stop', {method:'POST'}).catch(() => {}).then(poll);
+  };
+}
+
+const SAID = {
+  sending:  r => [`Sending it to ${r}...`, 0],
+  driving:  r => [`On its way to ${r}. The other rooms are locked until it ` +
+                  `arrives -- Stop to change your mind.`, 0],
+  stopping: r => [`Telling it to stop...`, 0],
+  arrived:  r => [`Arrived at ${r}.`, 0],
+  cancelled:r => [`Stopped on the way to ${r}.`, 0],
+  rejected: r => [`Nav2 turned down ${r}.`, 1],
+  failed:   r => [`Could not reach ${r}.`, 1],
+};
+
+function paintRooms(st) {
+  const box = document.getElementById('rooms');
+  box.hidden = st.mode !== 'auto' || !ROOMS.length;
+  if (box.hidden) { going = false; return; }
+
+  const nav = st.nav || {phase:'idle'};
+  // Locked for exactly as long as rover_nav.py is alive. 'stopping' is one
+  // of those: the cancel takes a moment to reach Nav2 and the rover is still
+  // moving until it does.
+  going = ['sending', 'driving', 'stopping'].includes(nav.phase);
+  document.getElementById('rstop').hidden = !going;
+
+  document.querySelectorAll('.room').forEach(el => {
+    const mine = el.dataset.room === nav.room;
+    // Locked out while it drives, and until nav2 is actually up: a goal sent
+    // before then is refused, which reads as the button being broken.
+    el.disabled = going || !st.ready;
+    el.classList.toggle('going', going && mine);
+    el.classList.toggle('here', !going && mine && nav.phase === 'arrived');
+    el.querySelector('.dist').textContent =
+      (going && mine && nav.remaining != null)
+        ? nav.remaining.toFixed(1) + ' m' : '';
+  });
+
+  const note = document.getElementById('rnote');
+  const entry = ROOMS.find(([k]) => k === nav.room);
+  let text = '', bad = false;
+  if (entry && SAID[nav.phase]) {
+    const [said, isBad] = SAID[nav.phase](entry[1].toLowerCase());
+    text = said + (isBad && nav.detail ? ' ' + nav.detail : '');
+    bad = !!isBad;
+  } else if (!st.ready) {
+    text = 'Waiting for navigation to come up.';
+  }
+  note.textContent = text;
+  note.classList.toggle('bad', bad);
+}
+
+async function goRoom(key) {
+  if (going) return;
+  // Lock now rather than at the next poll, so a second tap in the meantime
+  // cannot land. The server refuses one anyway; this just makes the page
+  // agree with it.
+  going = true;
+  document.querySelectorAll('.room').forEach(el => el.disabled = true);
+  document.getElementById('rnote').textContent = 'Sending...';
+  try { await fetch('/api/goto/' + key, {method:'POST'}); } catch (e) {}
+  poll();
 }
 
 function progress(st) {
@@ -291,6 +565,7 @@ async function switchTo(key) {
   fetch('/api/switch/' + key, {method: 'POST'}).catch(() => {});
 }
 
+buildRooms();
 poll();
 setInterval(poll, 1200);
 </script></body></html>
@@ -314,25 +589,52 @@ class Handler(BaseHTTPRequestHandler):
             page = PAGE.replace("__MODES__", json.dumps(
                 {k: {kk: v[kk] for kk in ("label", "blurb", "steps")}
                  for k, v in MODES.items()}))
+            # The rooms never change while the server runs, so they ship with
+            # the page rather than riding along on every status poll.
+            page = page.replace("__ROOMS__", json.dumps(
+                [[r, room_label(r)] for r in ROOM_NAMES]))
             self._send(200, page, "text/html; charset=utf-8")
         elif self.path == "/api/status":
             self._send(200, json.dumps(status()), "application/json")
         else:
             self._send(404, "not found", "text/plain")
 
+    def _reply(self, ok, detail, code=None):
+        self._send(code or (200 if ok else 409),
+                   json.dumps({"ok": ok, "detail": detail}),
+                   "application/json")
+
     def do_POST(self):
-        if not self.path.startswith("/api/switch/"):
-            return self._send(404, "not found", "text/plain")
-        key = self.path.rsplit("/", 1)[-1]
+        if self.path.startswith("/api/switch/"):
+            return self._switch(self.path.rsplit("/", 1)[-1])
+        if self.path.startswith("/api/goto/"):
+            return self._goto(self.path.rsplit("/", 1)[-1])
+        if self.path == "/api/nav/stop":
+            return self._reply(*NAV.stop())
+        self._send(404, "not found", "text/plain")
+
+    def _switch(self, key):
         if key not in MODES:
             return self._send(400, "unknown mode", "text/plain")
+        # Leaving autonomous takes Nav2 down under any goal in flight. Cancel
+        # it first so the rover is told to stop, rather than being cut off
+        # mid-drive and coasting.
+        if key != "auto":
+            NAV.stop()
         # Conflicts= in the target files stops the other mode; starting the
         # one we want is the whole operation.
         code, out = systemctl("start", "--no-block", MODES[key]["target"],
                               root=True)
-        self._send(200 if code == 0 else 500,
-                   json.dumps({"ok": code == 0, "detail": out}),
-                   "application/json")
+        self._reply(code == 0, out, code=200 if code == 0 else 500)
+
+    def _goto(self, room):
+        if room not in ROOMS:
+            return self._send(400, "unknown room", "text/plain")
+        # Nav2 only exists in autonomous mode, and a goal sent in remote
+        # control would sit there waiting for a server that is not coming.
+        if current_mode() != "auto":
+            return self._reply(False, "not in autonomous mode")
+        self._reply(*NAV.go(room))
 
     def log_message(self, *a):
         pass          # one line per poll, every 1.2s, is not worth journalling

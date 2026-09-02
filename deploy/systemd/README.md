@@ -28,6 +28,28 @@ actually answer, then redirects to it -- systemd calls a unit active the moment
 the process starts, which is well before the page is servable, and redirecting
 then gives a connection-refused that reads as "it is broken".
 
+In autonomous mode the same page also lists the rooms from `rooms.py`, so a
+goal can be sent without speaking to the rover. Sending one *does* need ROS,
+which that process does not have and must not acquire -- importing rclpy into
+the one service that can never fail is the wrong trade. So it runs
+`rover_nav.py --json <room>` as a child, under `bash -lc` with the setup
+scripts sourced, and reads a line of JSON per event back:
+
+    {"event": "sent",     "room": "kitchen", "detail": "..."}
+    {"event": "feedback", "room": "kitchen", "remaining": 4.02}
+    {"event": "done",     "room": "kitchen", "outcome": "arrived", "detail": ""}
+
+One child at a time, and the page locks every other room button while it
+lives -- two goals in flight would just have Nav2 preempt one with the other,
+which is not what tapping a second room looks like it should do. Stop sends
+SIGTERM, which `rover_nav.py` turns into a Nav2 cancel before exiting; the
+`exec` in the command line matters, because a wrapping shell would swallow
+that signal and the rover would keep driving. Leaving autonomous mode cancels
+in the same way, rather than pulling Nav2 out from under a moving rover.
+
+None of this needs sudo: the child runs as the same unprivileged user, and the
+sudoers rule is still just the two `systemctl start` commands.
+
 Starting a target needs root, so `rover-mode.sudoers` grants that user exactly
 two `systemctl start` commands and `is-active`. Not blanket sudo: a page
 reachable from the home network should not be able to do more than change the
