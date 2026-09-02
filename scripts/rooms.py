@@ -10,8 +10,6 @@ and qy are always zero.
 
 from __future__ import annotations
 
-import difflib
-
 ROOMS = {
     "work_room":        (  2.276,  8.183, -0.8196,  0.5730),
     "entrance":         ( -2.94,   7.20,  -0.582,  -0.813),
@@ -83,28 +81,7 @@ def resolve_room(name: str) -> str | None:
         return ALIASES[n]
     # "my room." from speech, or a trailing possessive
     n = n.rstrip(".!?,")
-    if n in ALIASES:
-        return ALIASES[n]
-
-    # Nothing matched exactly. Speech recognition mishears room names --
-    # "walk room" for "work room" -- and an accent it was not trained on
-    # mishears them consistently. One wrong letter should not defeat a ten-room
-    # vocabulary, so fall back to the closest name. The cutoff is high enough
-    # that a room we do not have still returns None rather than driving
-    # somewhere approximate.
-    spoken = {k.replace("_", " "): k for k in ROOMS}
-    spoken.update(ALIASES)
-    # 0.76 is measured, not guessed: across mishearings this has to catch
-    # ("walk room", "kitchin", "offis room") the worst score is 0.78, and
-    # across rooms the house does not have ("bathroom", "garage", a bare
-    # "room") the best is 0.73. The margin is thin, so a fuzzy hit says so --
-    # a wrong guess should be visible rather than silently driving somewhere.
-    close = difflib.get_close_matches(n, list(spoken), n=1, cutoff=0.76)
-    if close:
-        room = spoken[close[0]]
-        print(f'[heard "{name.strip()}", taking it as {room}]')
-        return room
-    return None
+    return ALIASES.get(n)
 
 
 def spoken_name(room: str) -> str:
