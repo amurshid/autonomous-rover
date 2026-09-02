@@ -63,6 +63,12 @@ MAX_HISTORY = 40  # messages kept after the system prompt. Every one is
 
 MAX_STEPS = 8          # see Brain.run_sequence
 
+# What still gets through while the wheels are turning. Deliberately narrow:
+# anything else heard mid-drive is far more likely to be the motors than a
+# person.
+STOP_WORDS = re.compile(r'\b(stop|cancel|halt|abort|wait|freeze|stay)\b',
+                        re.IGNORECASE)
+
 SYSTEM = (
     "You are a small four-wheeled robot that drives around a house. Speak in "
     "the first person; never call yourself \"the rover\" or \"the robot\". "
@@ -634,6 +640,17 @@ def main():
                 heard = voice.listen_once()
                 if not heard or len(heard) < 3:
                     continue
+                # Driving, the mic hears the motors, and Whisper turns that
+                # into confident sentences -- "I'm going to go to the top" --
+                # which the model then answers. A whole conversation can
+                # happen while the rover crosses a room, and it poisons the
+                # history: after enough of it, a request to retry a room
+                # produced an unasked-for drive and a web search about robots
+                # in space. Only stop-like commands get through while moving,
+                # because that is the one thing worth hearing over the noise.
+                if nav.is_navigating() and not STOP_WORDS.search(heard):
+                    print(f'[ignored while driving: {heard!r}]')
+                    continue
                 print(f'\nyou (voice) > {heard}')
                 reply = brain.ask(heard)
                 if reply:
@@ -680,9 +697,16 @@ def main():
         # when the context has gone: the bridge zeroes the motors 0.5 s after
         # /cmd_vel stops arriving (command_timeout), so the rover halts either
         # way.
-        if rclpy.ok():
-            nav.cancel()
-            motions.do_stop()
+        # rclpy.ok() is not enough on Ctrl-C: it reads true here and the
+        # context is gone by the time publish() runs a moment later. The
+        # bridge zeroes the motors 0.5 s after /cmd_vel stops arriving
+        # (command_timeout), so a missed stop is covered either way.
+        try:
+            if rclpy.ok():
+                nav.cancel()
+                motions.do_stop()
+        except Exception:
+            pass
         if voice:
             voice.close()
         # Stop the executor before the nodes it holds. Left spinning, the C++
