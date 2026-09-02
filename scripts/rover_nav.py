@@ -13,8 +13,10 @@ Design notes
   run under a MultiThreadedExecutor.
 """
 
+import json
 import math
 import os
+import signal
 import sys
 import threading
 
@@ -180,14 +182,43 @@ class RoverNav(Node):
 
 
 def main():
-    """Standalone smoke test: python3 rover_nav.py kitchen"""
+    """Send one goal, report on it, exit 0 only if the rover arrived.
+
+        python3 rover_nav.py kitchen            # for a person
+        python3 rover_nav.py --json kitchen     # one JSON object per line
+
+    --json is for callers that are not ROS nodes. rover_mode_web.py is one: it
+    runs on port 80 in both modes and must keep working with no ROS on its
+    path, so it spawns this and reads the stream rather than importing rclpy.
+
+    Events are {"event": "sent"|"feedback"|"done", ...}. SIGTERM and Ctrl-C
+    both cancel the goal before exiting -- a caller that kills this must not
+    leave Nav2 driving to a goal nobody is watching any more.
+    """
     from rclpy.executors import MultiThreadedExecutor
 
-    room = sys.argv[1] if len(sys.argv) > 1 else "kitchen"
+    flags = [a for a in sys.argv[1:] if a.startswith("-")]
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    as_json = "--json" in flags
+    room = args[0] if args else "kitchen"
+
     done = threading.Event()
+    settled = {"outcome": "cancelled", "detail": ""}
+
+    def emit(event, **kw):
+        if as_json:
+            print(json.dumps({"event": event, **kw}), flush=True)
+        elif event == "feedback":
+            d = kw["remaining"]
+            print(f"  {d:.2f} m remaining" if d is not None else "  ...", flush=True)
+        elif event == "sent":
+            print(kw["detail"], flush=True)
+        else:
+            print(f"\n[{kw['outcome']}] {kw['room']} {kw['detail']}".rstrip(), flush=True)
 
     def report(r, outcome, detail):
-        print(f"\n[{outcome}] {r} {detail}")
+        settled.update(outcome=outcome, detail=detail)
+        emit("done", room=r, outcome=outcome, detail=detail)
         done.set()
 
     rclpy.init()
@@ -196,17 +227,40 @@ def main():
     ex.add_node(node)
     threading.Thread(target=ex.spin, daemon=True).start()
 
-    print(node.go_to_room(room)[1])
+    # rclpy installs its own SIGTERM handler, which shuts the context down
+    # without unwinding this function -- the goal would be left running and
+    # the loop below would spin on a dead context. Take the signal back so
+    # SIGTERM means what Ctrl-C means here: cancel, then go.
+    def sigterm(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, sigterm)
+
+    ok, msg = node.go_to_room(room)
+    if ok:
+        emit("sent", room=room, detail=msg)
+    else:
+        report(room, "failed", msg)
+
     try:
-        while not done.wait(2.0):
-            d = node.distance_remaining()
-            print(f"  {d:.2f} m remaining" if d is not None else "  ...")
+        while rclpy.ok() and not done.wait(1.0):
+            emit("feedback", room=room, remaining=node.distance_remaining())
     except KeyboardInterrupt:
         node.cancel()
+        emit("done", room=room, outcome="cancelled", detail="")
+        settled.update(outcome="cancelled", detail="")
+        # cancel_goal_async only queues the request. Exiting on top of it
+        # leaves Nav2 driving, so hold the executor open long enough for the
+        # cancel to actually go out.
+        threading.Event().wait(1.5)
     finally:
+        # Stop the executor before the node it is spinning, or the C++ layer
+        # aborts as the node is destroyed beneath it.
+        ex.shutdown()
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
+    return 0 if settled["outcome"] == "arrived" else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
