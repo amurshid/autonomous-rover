@@ -172,10 +172,10 @@ addEventListener('blur',allStop);
 // /snapshot.jpg, which every browser can display.
 const cam=document.getElementById('cam'),camsg=document.getElementById('camsg'),
       camtog=document.getElementById('camtog');
-let camOn=true,poll=null,watchdog=null,gotFrame=false;
+let camOn=true,poll=null,watchdog=null,gotFrame=false,gap=150;
 function msg(t){camsg.textContent=t;camsg.style.display=t?'':'none'}
 function camStop(){
-  if(poll){clearInterval(poll);poll=null}
+  if(poll){clearTimeout(poll);poll=null}
   if(watchdog){clearTimeout(watchdog);watchdog=null}
   gotFrame=false;
   cam.removeAttribute('src');
@@ -188,12 +188,19 @@ function camStart(){
 function camPoll(){
   if(poll)return;
   cam.removeAttribute('src');
-  poll=setInterval(()=>{if(!document.hidden)cam.src='/snapshot.jpg?'+Date.now()},150);
+  // setTimeout, not setInterval: a camera that is gone answers instantly with
+  // a 503, and retrying that every 150 ms is a request storm aimed at a Pi
+  // that has nothing to send. Widen the gap on failure, snap back on a frame.
+  const tick=()=>{
+    poll=setTimeout(tick,gap);
+    if(!document.hidden)cam.src='/snapshot.jpg?'+Date.now();
+  };
+  tick();
 }
-cam.addEventListener('load',()=>{gotFrame=true;msg('')});
+cam.addEventListener('load',()=>{gotFrame=true;gap=150;msg('')});
 cam.addEventListener('error',()=>{
   if(!camOn)return;
-  if(poll){msg('camera unavailable')}          // polling already retrying
+  if(poll){gap=Math.min(gap*2,2000);msg('camera offline')}  // already retrying
   else{clearTimeout(watchdog);camPoll()}
 });
 camtog.onclick=()=>{
@@ -221,12 +228,27 @@ class Camera:
     the present, not a backlog -- and nothing is encoded at all unless somebody
     asked for a frame in the last few seconds, so an unwatched stream costs the
     Pi (which throttles at 80 C) one memcpy per frame.
+
+    A camera that dies has to stay cheap. It measured 273% CPU once -- nearly
+    three cores, on a Pi that throttles at 80 C -- for a stream showing
+    nothing. Two causes, both handled here: readers used to wake each other
+    (see the conditions below), and a reader with no frame to return used to
+    block for its full timeout, so the page's 150 ms retries piled up twenty
+    deep. Now a stale camera is answered immediately and the page backs off.
     """
 
     DEMAND_TTL = 3.0
+    STALE_S = 3.0     # no frame for this long and the camera counts as gone
 
     def __init__(self, quality, max_fps, log):
-        self.cv = threading.Condition()
+        # Two conditions over one lock. Readers must never wake other
+        # readers: a woken reader re-notifies, and with no frames arriving
+        # nothing ever breaks the cycle, so the pair spins flat out. Readers
+        # signal the encoder on `demand`, the encoder signals readers on
+        # `frame`, and neither can wake its own kind.
+        self.lock = threading.Lock()
+        self.frame = threading.Condition(self.lock)
+        self.demand = threading.Condition(self.lock)
         self.log = log
         self.quality = quality
         self.min_period = 1.0 / max_fps if max_fps > 0 else 0.0
@@ -235,8 +257,10 @@ class Camera:
         self.jpeg = None
         self.jpeg_seq = 0
         self.last_demand = 0.0
+        self.last_frame = 0.0
         self.seen = 0
         self.warned = False
+        self.stale_logged = False
         threading.Thread(target=self._encode_loop, daemon=True).start()
 
     def _wanted(self):
@@ -244,25 +268,42 @@ class Camera:
 
     def submit(self, msg):
         """ROS callback. Keeps a copy of the newest frame and nothing else."""
-        with self.cv:
+        with self.lock:
             self.seen += 1
+            # Set before the _wanted() check: liveness must be observable even
+            # while nothing is being encoded, or an unwatched camera looks dead.
+            self.last_frame = time.monotonic()
+            if self.stale_logged:
+                self.stale_logged = False
+                self.log('camera frames resumed')
             if not self._wanted():
                 return
             self.raw = (bytes(msg.data), msg.height, msg.width, msg.encoding)
             self.raw_seq += 1
-            self.cv.notify_all()
+            self.demand.notify()
 
     def next_jpeg(self, seq, timeout):
         """Block for a frame newer than `seq`. Returns (jpeg, seq) or (None, seq)."""
         deadline = time.monotonic() + timeout
-        with self.cv:
+        with self.lock:
             while self.jpeg_seq == seq:
-                self.last_demand = time.monotonic()
-                self.cv.notify_all()      # wake the encoder if it went idle
-                left = deadline - self.last_demand
+                now = time.monotonic()
+                self.last_demand = now
+                # Nothing is coming. Say so now rather than holding the
+                # request open for its full timeout: the page retries every
+                # 150 ms, and 3 s answers stack twenty threads deep per viewer.
+                if now - self.last_frame >= self.STALE_S:
+                    if self.seen and not self.stale_logged:
+                        self.stale_logged = True
+                        self.log(f'no camera frames for '
+                                 f'{now - self.last_frame:.0f}s; '
+                                 f'is rover-camera running?')
+                    return None, seq
+                self.demand.notify()      # wake the encoder if it went idle
+                left = deadline - now
                 if left <= 0:
                     return None, seq
-                self.cv.wait(min(left, 0.5))
+                self.frame.wait(min(left, 0.5))
             self.last_demand = time.monotonic()
             return self.jpeg, self.jpeg_seq
 
@@ -270,9 +311,9 @@ class Camera:
         done = 0
         next_ok = 0.0
         while True:
-            with self.cv:
+            with self.lock:
                 while self.raw_seq == done or not self._wanted():
-                    self.cv.wait(0.5)
+                    self.demand.wait(0.5)
                 raw, done = self.raw, self.raw_seq
             now = time.monotonic()
             if now < next_ok:
@@ -281,10 +322,10 @@ class Camera:
             jpeg = self._to_jpeg(raw)
             if jpeg is None:
                 continue
-            with self.cv:
+            with self.lock:
                 self.jpeg = jpeg
                 self.jpeg_seq += 1
-                self.cv.notify_all()
+                self.frame.notify_all()
 
     def _to_jpeg(self, raw):
         data, h, w, encoding = raw

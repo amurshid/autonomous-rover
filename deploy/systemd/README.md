@@ -135,6 +135,15 @@ Nav2 planning from a pose that no longer means anything is worse than Nav2
 being briefly absent, and it will need another minute to find itself either
 way.
 
+**A camera that dies is now cheap.** It was not: `rover_teleop_web.py` once
+measured 273% CPU -- nearly three cores, on a Pi that throttles at 80 C --
+streaming nothing. `rover-camera` has `Restart=always`, so this only shows up
+if the camera fails in a way that restarting cannot fix. `journalctl -u
+rover-teleop` says so directly now:
+
+    no camera frames for 3s; is rover-camera running?
+    camera frames resumed
+
 To re-run the whole sequence by hand:
 
     sudo systemctl restart rover.target
