@@ -4,7 +4,7 @@
 The rover runs one of two modes and never both, because Nav2 and the teleop
 page would otherwise fight over /cmd_vel:
 
-  autonomous  lidar, cartographer, relocalisation, nav2, voice
+  autonomous  lidar, cartographer, nav2, voice
   remote      the teleop page, driven by hand
 
 Switching is two systemd targets with Conflicts= between them, so starting
