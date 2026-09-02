@@ -379,6 +379,12 @@ PAGE = """<!doctype html>
     * { animation:none !important; transition-duration:.01ms !important; }
   }
   .note { margin-top:1.4rem; color:var(--dim); font-size:.8rem; min-height:1.2em; }
+  .go { display:block; margin-top:.2rem; padding:.85rem 1rem; text-align:center;
+        background:var(--accent); color:#fff; font-size:.95rem; font-weight:600;
+        border-radius:10px; text-decoration:none;
+        animation:rise .3s ease-out; }
+  .go:active { transform:scale(.985); }
+  @keyframes rise { from { opacity:0; transform:translateY(4px); } }
 </style></head><body>
 
 <div class="wrap">
@@ -526,10 +532,22 @@ function progress(st) {
 function finish(st) {
   const note = document.getElementById('vnote');
   if (busy === 'teleop') {
-    note.textContent = 'Opening the controls...';
-    setTimeout(() => {
-      location.href = `http://${location.hostname}:${st.teleop_port}/`;
-    }, 650);
+    // A link the user taps, not location.href and not window.open. Navigating
+    // away meant that coming back restored this page from cache with the
+    // overlay still up and busy still set, which looked like it had hung. And
+    // window.open outside a tap is blocked on phones. An anchor with
+    // target=_blank is neither: it opens a tab, and this page stays put.
+    const url = `http://${location.hostname}:${st.teleop_port}/`;
+    note.innerHTML =
+      `<a class="go" href="${url}" target="_blank" rel="noopener">` +
+      `Open the controls</a>`;
+    note.querySelector('a').addEventListener('click', () => {
+      setTimeout(() => {
+        busy = null;
+        document.getElementById('veil').classList.remove('on');
+        poll();
+      }, 400);
+    });
   } else {
     note.textContent = 'Ready.';
     setTimeout(() => {
@@ -545,11 +563,14 @@ async function switchTo(key) {
   const st = await (await fetch('/api/status')).json();
   const already = st.mode === key;
   if (already && key === 'teleop' && st.ready) {
-    // Already there and serving -- go straight through, no overlay.
-    location.href = `http://${location.hostname}:${st.teleop_port}/`;
-    return;
+    // Already there and serving. The await above costs the user gesture on
+    // some phones, so window.open can be blocked -- when it is, fall through
+    // to the overlay, whose link the user taps directly.
+    if (window.open(`http://${location.hostname}:${st.teleop_port}/`,
+                    '_blank', 'noopener')) return;
+  } else if (already && st.ready) {
+    return;                             // autonomous, already up: nothing to do
   }
-  if (already && st.ready) return;      // autonomous, already up: nothing to do
   // Otherwise this mode is selected but not finished coming up -- a unit that
   // was never enabled, or one still starting. Show the checklist and wait,
   // rather than absorbing the tap and looking broken. That is what happened
