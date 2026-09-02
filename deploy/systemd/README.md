@@ -106,6 +106,11 @@ none appears.
          rover-cartographer rover-initialpose rover-nav2 rover-ai
     sudo systemctl enable rover-teleop rover-mode
 
+`rover-teleop` and `rover-mode` are easy to miss. `WantedBy=` only takes
+effect on `enable` -- without it `rover-teleop.target` comes up active with no
+service under it, nothing listens on 8080, and the page has a mode selected
+that never finishes arriving.
+
 ## When something fails
 
 Long-running units restart themselves: the drivers (`bridge`, `lidar`,

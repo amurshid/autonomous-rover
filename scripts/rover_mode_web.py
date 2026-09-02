@@ -543,13 +543,18 @@ function finish(st) {
 async function switchTo(key) {
   if (busy) return;
   const st = await (await fetch('/api/status')).json();
-  if (st.mode === key) {
-    // Already in this mode -- go straight through rather than restarting it.
-    if (key === 'teleop' && st.ready) {
-      location.href = `http://${location.hostname}:${st.teleop_port}/`;
-    }
+  const already = st.mode === key;
+  if (already && key === 'teleop' && st.ready) {
+    // Already there and serving -- go straight through, no overlay.
+    location.href = `http://${location.hostname}:${st.teleop_port}/`;
     return;
   }
+  if (already && st.ready) return;      // autonomous, already up: nothing to do
+  // Otherwise this mode is selected but not finished coming up -- a unit that
+  // was never enabled, or one still starting. Show the checklist and wait,
+  // rather than absorbing the tap and looking broken. That is what happened
+  // when rover-teleop had no symlink: the target was active, its service was
+  // not, and tapping did nothing at all.
   busy = key;
   const m = MODES[key];
   document.getElementById('vtitle').textContent = 'Starting ' + m.label.toLowerCase();
@@ -562,7 +567,9 @@ async function switchTo(key) {
   // through rather than eight rows appearing at once.
   document.querySelectorAll('#vlist li').forEach((li, i) =>
     setTimeout(() => li.classList.add('seen'), 60 * i));
-  fetch('/api/switch/' + key, {method: 'POST'}).catch(() => {});
+  // Nothing to start if we are already in this mode -- the polling below will
+  // redirect or finish once whatever is missing comes up.
+  if (!already) fetch('/api/switch/' + key, {method: 'POST'}).catch(() => {});
 }
 
 buildRooms();
