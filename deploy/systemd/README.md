@@ -106,6 +106,18 @@ none appears.
          rover-cartographer rover-initialpose rover-nav2 rover-ai
     sudo systemctl enable rover-teleop rover-mode
 
+**Use `reenable`, not `enable`, when a unit's `[Install]` section has moved.**
+`enable` leaves an existing symlink alone, so a unit enabled under an older
+`WantedBy=` keeps pointing at the old target -- and `is-enabled` still says
+`enabled`, because it only checks that a symlink exists somewhere, not where.
+That is how `rover-bridge` and `rover-camera` ended up in
+`rover.target.wants/` after they moved to `rover-common.target`: present under
+autonomous, gone the moment you switched to remote control, with
+`rover-common.target` reporting active and holding nothing.
+
+    sudo systemctl reenable rover-bridge rover-camera
+    ls /etc/systemd/system/rover-common.target.wants/
+
 `rover-teleop` and `rover-mode` are easy to miss. `WantedBy=` only takes
 effect on `enable` -- without it `rover-teleop.target` comes up active with no
 service under it, nothing listens on 8080, and the page has a mode selected
