@@ -19,6 +19,7 @@ import os
 import signal
 import sys
 import threading
+import time
 
 import rclpy
 from action_msgs.msg import GoalStatus, GoalStatusArray
@@ -249,6 +250,137 @@ class RoverNav(Node):
             self.get_logger().error(f"on_done callback raised: {e}")
 
 
+class GoalPoseSender(Node):
+    """Send a goal by topic and read the verdict off the action status.
+
+    An rclpy ActionClient subscribes to the action's feedback topic, and
+    bt_navigator publishes NavigateToPose feedback on every behaviour-tree
+    tick -- around 100 Hz at bt_loop_duration: 10. rclpy takes and
+    deserialises every one of those whether or not a feedback callback is
+    registered, and that is most of what this process cost during a drive.
+
+    /goal_pose plus the status topic costs a handful of messages per goal
+    instead: status is published on state transitions, not continuously. The
+    goal is tracked by its own uuid, so a goal somebody else sent -- a voice
+    command preempting this one -- is never mistaken for ours.
+
+    What is lost is distance_remaining. It only ever drove a number on the
+    page; the buttons lock on "sent" and unlock on "done" either way.
+    """
+
+    TERMINAL = {
+        GoalStatus.STATUS_SUCCEEDED: "arrived",
+        GoalStatus.STATUS_ABORTED: "failed",
+        GoalStatus.STATUS_CANCELED: "cancelled",
+    }
+    LIVE = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
+
+    def __init__(self, on_done=None):
+        super().__init__("rover_nav")
+        self.cb = ReentrantCallbackGroup()
+        self.on_done = on_done
+        self.last_outcome = None
+
+        self._lock = threading.Lock()
+        self._target = None          # room name currently being driven to
+        self._uuid = None            # our goal, once it appears in the status
+        self._before = set()         # goals already live when we published
+        self._settled = False
+
+        self._pub = self.create_publisher(PoseStamped, "goal_pose", 10)
+        self.create_subscription(
+            GoalStatusArray, "navigate_to_pose/_action/status",
+            self._status_cb, STATUS_QOS, callback_group=self.cb)
+        self._cancel_cli = self.create_client(
+            CancelGoal, "navigate_to_pose/_action/cancel_goal",
+            callback_group=self.cb)
+
+    # ---------------------------------------------------------------- state
+
+    def is_navigating(self):
+        with self._lock:
+            return self._target is not None
+
+    def target(self):
+        with self._lock:
+            return self._target
+
+    def distance_remaining(self):
+        return None                  # no feedback subscription, by design
+
+    def _status_cb(self, msg):
+        with self._lock:
+            if self._target is None or self._settled:
+                return
+            if self._uuid is None:
+                # The first goal that is live and was not live when we
+                # published is ours. Tracking by uuid keeps somebody else's
+                # goal -- or the one ours preempted -- from being read as us.
+                for st in msg.status_list:
+                    uid = bytes(st.goal_info.goal_id.uuid)
+                    if st.status in self.LIVE and uid not in self._before:
+                        self._uuid = uid
+                        break
+                if self._uuid is None:
+                    return
+            for st in msg.status_list:
+                if bytes(st.goal_info.goal_id.uuid) != self._uuid:
+                    continue
+                outcome = self.TERMINAL.get(st.status)
+                if outcome:
+                    room, self._target = self._target, None
+                    self._settled = True
+                    self.last_outcome = outcome
+                    if self.on_done:
+                        self.on_done(room, outcome, "")
+                return
+
+    # ------------------------------------------------------------- commands
+
+    def go_to_room(self, room):
+        """Publish the goal. Returns (ok, message) immediately."""
+        key = resolve_room(room)
+        if key is None:
+            return False, f"unknown room '{room}'"
+        x, y, qz, qw = ROOMS[key]
+
+        # goal_pose is reliable, but a message published before bt_navigator
+        # has matched is dropped -- the same trap as /initialpose.
+        deadline = time.time() + 5.0
+        while self._pub.get_subscription_count() == 0:
+            if time.time() > deadline:
+                return False, "nothing subscribed to /goal_pose -- is nav2 running?"
+            time.sleep(0.1)
+
+        with self._lock:
+            self._target = key
+            self._uuid = None
+            self._settled = False
+
+        msg = PoseStamped()
+        msg.header.frame_id = "map"
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.position.x, msg.pose.position.y = float(x), float(y)
+        msg.pose.orientation.z, msg.pose.orientation.w = float(qz), float(qw)
+        self._pub.publish(msg)
+        return True, f"driving to {key}"
+
+    def cancel(self):
+        """Cancel our goal, or every goal if it never got an id."""
+        with self._lock:
+            was, self._target = self._target, None
+            uid = self._uuid
+        if was is None:
+            return False, "not currently navigating"
+        if not self._cancel_cli.service_is_ready():
+            return False, "nav2 cancel service unavailable"
+        req = CancelGoal.Request()
+        if uid:
+            req.goal_info.goal_id.uuid = list(uid)
+        self._cancel_cli.call_async(req)
+        return True, f"cancelled navigation to {was}"
+
+
 def main():
     """Send one goal, report on it, exit 0 only if the rover arrived.
 
@@ -259,9 +391,15 @@ def main():
     runs on port 80 in both modes and must keep working with no ROS on its
     path, so it spawns this and reads the stream rather than importing rclpy.
 
-    Events are {"event": "sent"|"feedback"|"done", ...}. SIGTERM and Ctrl-C
-    both cancel the goal before exiting -- a caller that kills this must not
-    leave Nav2 driving to a goal nobody is watching any more.
+    Events are {"event": "sent"|"done", ...}. SIGTERM and Ctrl-C both cancel
+    the goal before exiting -- a caller that kills this must not leave Nav2
+    driving to a goal nobody is watching any more.
+
+    No "feedback" events: the goal goes out on /goal_pose and the verdict
+    comes off the action status topic, so there is no distance to report.
+    Holding an action client meant taking ~100 feedback messages a second for
+    the whole drive. The page locks its buttons on "sent" and unlocks on
+    "done" regardless.
     """
     from rclpy.executors import MultiThreadedExecutor
 
@@ -276,9 +414,6 @@ def main():
     def emit(event, **kw):
         if as_json:
             print(json.dumps({"event": event, **kw}), flush=True)
-        elif event == "feedback":
-            d = kw["remaining"]
-            print(f"  {d:.2f} m remaining" if d is not None else "  ...", flush=True)
         elif event == "sent":
             print(kw["detail"], flush=True)
         else:
@@ -290,10 +425,10 @@ def main():
         done.set()
 
     rclpy.init()
-    # No pose subscription: this path sends a goal and reports on it. Progress
-    # comes from Nav2's own action feedback, not from /tracked_pose, and
-    # nothing here calls pose() or nearest_room().
-    node = RoverNav(on_done=report, track_pose=False)
+    # Not RoverNav: that holds an action client, whose feedback subscription
+    # runs at the behaviour-tree tick rate for the whole drive. This sends the
+    # goal on a topic and reads the verdict off the action status instead.
+    node = GoalPoseSender(on_done=report)
     ex = MultiThreadedExecutor()
     ex.add_node(node)
     threading.Thread(target=ex.spin, daemon=True).start()
@@ -313,8 +448,10 @@ def main():
         report(room, "failed", msg)
 
     try:
+        # Nothing to report between the goal going out and the verdict coming
+        # back, so just wait for it.
         while rclpy.ok() and not done.wait(1.0):
-            emit("feedback", room=room, remaining=node.distance_remaining())
+            pass
     except KeyboardInterrupt:
         node.cancel()
         emit("done", room=room, outcome="cancelled", detail="")

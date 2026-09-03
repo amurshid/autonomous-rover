@@ -45,9 +45,21 @@ the one service that can never fail is the wrong trade. So it runs
 `rover_nav.py --json <room>` as a child, under `bash -lc` with the setup
 scripts sourced, and reads a line of JSON per event back:
 
-    {"event": "sent",     "room": "kitchen", "detail": "..."}
-    {"event": "feedback", "room": "kitchen", "remaining": 4.02}
-    {"event": "done",     "room": "kitchen", "outcome": "arrived", "detail": ""}
+    {"event": "sent", "room": "kitchen", "detail": "..."}
+    {"event": "done", "room": "kitchen", "outcome": "arrived", "detail": ""}
+
+There is no `feedback` event and no distance countdown. The child used to
+hold a Nav2 action client, and rclpy takes and deserialises every message on
+the action's feedback topic whether or not a callback is registered --
+`bt_navigator` publishes that on each behaviour-tree tick, so ~100 Hz for the
+whole drive. It now publishes the goal on `/goal_pose` and reads the verdict
+off `navigate_to_pose/_action/status`, which is published on state
+transitions only: a handful of messages per goal instead of thousands.
+
+It tracks its own goal by uuid, so a goal somebody else sent -- a voice
+command preempting this one -- is never reported as ours. The buttons lock on
+`sent` and unlock on `done` either way; only the metres-remaining number is
+gone.
 
 That child does not subscribe to `/tracked_pose` (`track_pose=False`).
 Cartographer publishes it at ~192 Hz, and 192 rclpy callbacks a second is
