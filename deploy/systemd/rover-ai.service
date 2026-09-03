@@ -25,6 +25,11 @@ EnvironmentFile=/etc/rover/env
 # ("use_text = args.text or not args.voice"), which reads stdin -- and a
 # systemd service has none, so it would hit EOF at startup. Voice is also the
 # only interface that makes sense on a robot with no keyboard attached.
+# print() to a pipe is block-buffered, so under systemd the log
+# arrives in 4KB chunks or not until exit. These scripts say what
+# they are doing through print(); unbuffered is what makes
+# journalctl -f usable.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
     source /home/amurshid/ros2_ws/install/setup.bash && \
     exec python3 /home/amurshid/rover_ai.py --voice'

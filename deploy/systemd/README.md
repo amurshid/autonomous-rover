@@ -181,6 +181,25 @@ nothing.
     systemctl status 'rover-*'          # what is up
     journalctl -u rover-cartographer -b # this boot's localisation
     journalctl -f -u 'rover-*'          # everything, live
+    journalctl -f -u rover-nav2 -u rover-ai   # who moved the rover, in order
+
+Every unit running Python sets `PYTHONUNBUFFERED=1`. Without it `print()` to a
+pipe is block-buffered, and these scripts report themselves through `print()`
+-- `[ignored while driving: ...]`, `[searched: ...]`, `[mic calibrated: ...]`
+would arrive in 4KB chunks or not until the process exited, which makes
+`journalctl -f` look like nothing is happening.
+
+Nav2 is one launch file, so its nodes all log to `rover-nav2` with the node
+name in the prefix: `[controller_server-2]`, `[bt_navigator-4]`. For a goal
+that failed, `Failed to make progress` or `patience exceeded` from
+`controller_server` means the rover did not go where it was told -- which is
+what a second publisher on /cmd_vel looks like from Nav2's side. To settle
+that directly, while it drives:
+
+    ros2 topic info /cmd_vel --verbose
+
+`controller_server` should be the only publisher. `rover_motions` beside it is
+the fight.
 
     sudo systemctl stop rover.target
     sudo systemctl start rover.target

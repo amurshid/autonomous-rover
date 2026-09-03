@@ -14,6 +14,11 @@ WorkingDirectory=/home/amurshid
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Environment=ROVER_MODE_PORT=80
 Environment=ROVER_TELEOP_PORT=8080
+# print() to a pipe is block-buffered, so under systemd the log
+# arrives in 4KB chunks or not until exit. These scripts say what
+# they are doing through print(); unbuffered is what makes
+# journalctl -f usable.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 /home/amurshid/rover_mode_web.py
 Restart=always
 RestartSec=3

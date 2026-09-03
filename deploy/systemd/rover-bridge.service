@@ -13,6 +13,11 @@ PartOf=rover-common.target
 Type=simple
 User=amurshid
 WorkingDirectory=/home/amurshid
+# print() to a pipe is block-buffered, so under systemd the log
+# arrives in 4KB chunks or not until exit. These scripts say what
+# they are doing through print(); unbuffered is what makes
+# journalctl -f usable.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
     source /home/amurshid/ros2_ws/install/setup.bash && \
     exec python3 /home/amurshid/wave_rover_bridge.py'
