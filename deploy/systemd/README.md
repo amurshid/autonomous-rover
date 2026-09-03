@@ -180,6 +180,28 @@ effect on `enable` -- without it `rover-teleop.target` comes up active with no
 service under it, nothing listens on 8080, and the page has a mode selected
 that never finishes arriving.
 
+## Battery and temperature
+
+Both web pages show the Pi's temperature, read from the thermal zone, amber at
+70 C and red at 80 C -- the point it throttles, which this project has hit at
+83.8 C while starving the teleop stream.
+
+Battery voltage takes a longer route. The board reports it on the same serial
+line as everything else, and `wave_rover_bridge.py` owns that port -- a second
+reader would split the stream between them. So the bridge parses it on its own
+thread and writes `/run/rover/telemetry.json`, which both pages stat. That is
+also why it is a file and not a topic: the mode page has no ROS by design.
+
+`RuntimeDirectory=rover` on the bridge creates that directory owned by the
+service user and removes it when the unit stops, which is the behaviour you
+want -- a leftover file would show the last voltage seen as though it were
+current. `rover_health.py` treats anything older than 15 seconds as unknown
+for the same reason.
+
+Percentage is a straight line between 9.9 V and 12.6 V, overridable with
+`ROVER_V_EMPTY` / `ROVER_V_FULL`. It is not a discharge curve and it reads low
+under load: it answers "does this need charging soon", nothing finer.
+
 ## When something fails
 
 Long-running units restart themselves: the drivers (`bridge`, `lidar`,

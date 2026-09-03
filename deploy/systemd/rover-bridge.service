@@ -18,6 +18,12 @@ WorkingDirectory=/home/amurshid
 # they are doing through print(); unbuffered is what makes
 # journalctl -f usable.
 Environment=PYTHONUNBUFFERED=1
+# /run/rover, owned by this unit's user and removed when it stops. The bridge
+# leaves the battery voltage there because it owns the serial port and the
+# mode page has no ROS to receive a topic on. Removal on stop is deliberate:
+# a stale file would show the last voltage seen as though it were current.
+RuntimeDirectory=rover
+RuntimeDirectoryMode=0755
 ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
     source /home/amurshid/ros2_ws/install/setup.bash && \
     exec python3 /home/amurshid/wave_rover_bridge.py'
