@@ -42,8 +42,8 @@ In autonomous mode the same page also lists the rooms from `rooms.py`, so a
 goal can be sent without speaking to the rover. Sending one *does* need ROS,
 which that process does not have and must not acquire -- importing rclpy into
 the one service that can never fail is the wrong trade. So it runs
-`rover_goto.py <room>` as a child, under `bash -lc` with the setup scripts
-sourced, and reads a line of JSON per event back:
+`rover_nav.py --json <room>` as a child, under `bash -lc` with the setup
+scripts sourced, and reads a line of JSON per event back:
 
     {"event": "sent",     "room": "kitchen", "detail": "..."}
     {"event": "feedback", "room": "kitchen", "remaining": 4.02}
@@ -60,27 +60,46 @@ in the same way, rather than pulling Nav2 out from under a moving rover.
 None of this needs sudo: the child runs as the same unprivileged user, and the
 sudoers rule is still just the two `systemctl start` commands.
 
-`rover_goto.py` does not send the goal. It publishes the room on
-`rover/goto_request` and relays what `rover_ai` publishes back on
-`rover/goto_status`, so navigation has one owner.
+## The AI toggle
 
-It used to run `rover_nav.py --json <room>`, which sent the goal from that
-child. `is_navigating()` reports whether *this process* has a goal, so a drive
-started from a room button read as False inside rover_ai: the gate that stops
-it transcribing its own motors stayed open, it invented a command from the
-noise, and its manual `drive` published /cmd_vel alongside Nav2's controller.
-Two publishers at different rates is a rover that shakes and a goal that
-fails. A spoken "stop" could not fix it either -- `cancel()` had no handle for
-someone else's goal.
+Autonomous carries a **Talk to it** switch above the room buttons, and the two
+are exclusive:
 
-Both halves are fixed. Routing through rover_ai removes the second sender, and
-`anyone_navigating()` / `cancel_any()` read Nav2's own
-`navigate_to_pose/_action/status` and cancel-all service, which do not care
-which process asked -- still the right answer for anything else that sends a
-goal, `rover_nav.py` by hand included. A tapped room is now the same path as a
-spoken one, so the rover says where it is going and announces arrival either
-way. The cost is that room buttons need `rover-ai` up; the page already waits
-for it, since it is in the autonomous checklist.
+* **On** -- `rover-ai` is running and listening. The room buttons are locked,
+  because while it is listening it owns where the rover goes.
+* **Off** -- `rover-ai` is stopped. The room buttons work and send goals
+  straight to Nav2, and **nothing reaches Groq at all**.
+
+Off is the point. A listening rover_ai sends every burst of sound to Whisper
+before deciding what to do with it, and while driving that includes its own
+motors: `[heard 12.0s]` over and over, transcribed and then discarded by the
+gate. Stopping the unit stops that, along with a TTS request per spoken line
+against a cap of 100 a day.
+
+The exclusivity is also why the room buttons can go straight to Nav2 again.
+Two processes holding goals is how rover_ai came to drive by hand over the top
+of Nav2 -- `is_navigating()` reports whether *this* process has a goal, so a
+button-driven drive read as False inside rover_ai, the gate against its own
+motors stayed open, and it published /cmd_vel alongside the controller. The
+toggle makes that impossible rather than merely unlikely, since the two can
+never both be sending.
+
+`anyone_navigating()` and `cancel_any()` in `rover_nav.py` stay regardless.
+They read Nav2's own `navigate_to_pose/_action/status` and cancel-all service
+rather than a local handle, which is still the right answer for anything else
+that sends a goal -- `rover_nav.py` run by hand included -- and it is what
+makes a spoken "stop" able to cancel a goal this process never sent.
+
+`rover_goto.py` is the other way round: it hands the room to rover_ai, which
+speaks the destination and announces arrival. Unused by default; set
+`ROVER_NAV_CMD` to switch the page to it.
+
+`rover-ai` is deliberately **not** in the autonomous checklist. It is a
+toggle, not a prerequisite: the room buttons need Nav2, and listing it would
+make "all active" unreachable the moment somebody turned the AI off. Turning
+it on cancels any goal already in flight, and the switch is disabled while the
+rover is driving -- otherwise the buttons would unlock underneath a live
+goal.
 
 The page polls `/api/status` every 1.2s while a phone has it open, and that
 reply used to cost twelve `systemctl is-active` calls -- one per unit, two per
@@ -96,9 +115,11 @@ acknowledge goal request` -- not a logic fault, just no CPU to answer in.
 per poll down to one.
 
 Starting a target needs root, so `rover-mode.sudoers` grants that user exactly
-two `systemctl start` commands and `is-active`. Not blanket sudo: a page
-reachable from the home network should not be able to do more than change the
-mode.
+four commands and `is-active`. Not blanket sudo: a page reachable from the
+home network should not be able to do more than change the mode and whether
+the rover is listening. `rover-ai` is the only unit it can stop, and that is
+the harmless direction -- the rover goes quiet. Nothing there can stop the
+motors, Nav2, or the page itself.
 
 ## The dependency chain
 

@@ -58,13 +58,18 @@ except Exception:
 # a wrapping bash would swallow the SIGTERM that cancels the goal. The room
 # arrives as $1 rather than interpolated into the command, so nothing about it
 # reaches the shell as syntax.
-# rover_goto.py hands the room to rover_ai rather than sending the Nav2 goal
-# from here. Same event stream, one owner of navigation: two processes holding
-# goals is how rover_ai came to drive by hand over the top of Nav2.
+# Straight to Nav2. Two processes holding goals is how rover_ai came to drive
+# by hand over the top of Nav2, but the AI toggle below makes that impossible
+# rather than merely unlikely: room buttons are locked whenever rover-ai is
+# running, so these two never send a goal at the same time.
+#
+# rover_goto.py routes a room through rover_ai instead -- it speaks the
+# destination and announces arrival, at one Groq TTS request each. Set
+# ROVER_NAV_CMD to use it.
 NAV_CMD = os.environ.get("ROVER_NAV_CMD") or (
     "source /opt/ros/humble/setup.bash && "
     "source \"$HOME/ros2_ws/install/setup.bash\" && "
-    "exec python3 -u \"$HOME/rover_goto.py\" \"$1\""
+    "exec python3 -u \"$HOME/rover_nav.py\" --json \"$1\""
 )
 
 
@@ -87,11 +92,14 @@ MODES = {
         # the relocaliser left, so it runs in remote control only. Listing it
         # here would make "all active" unreachable and hang the loading
         # screen at six of seven with the room buttons still locked.
+        # rover-ai is deliberately absent. It is a toggle, not a
+        # prerequisite: the room buttons need Nav2, not the voice loop, and
+        # requiring it here would leave "all active" unreachable the moment
+        # somebody turned the AI off.
         "units": ["rover-bridge", "rover-lidar", "rover-cartographer",
-                  "rover-initialpose", "rover-seedpose",
-                  "rover-nav2", "rover-ai"],
+                  "rover-initialpose", "rover-seedpose", "rover-nav2"],
         "steps": ["Motors", "Lidar", "Map", "Pose bridge", "Position",
-                  "Navigation", "Voice"],
+                  "Navigation"],
     },
     "teleop": {
         "target": "rover-teleop.target",
@@ -119,8 +127,11 @@ def systemctl(*args, root=False):
 
 # Every name the page ever asks about, in a fixed order so one systemctl
 # call answers all of them.
+AI_UNIT = "rover-ai.service"
+
 _WATCHED = ([m["target"] for m in MODES.values()]
-            + [f"{u}.service" for m in MODES.values() for u in m["units"]])
+            + [f"{u}.service" for m in MODES.values() for u in m["units"]]
+            + [AI_UNIT])
 
 # Asking per unit meant twelve forks per poll, and the page polls every 1.2s
 # whenever a phone has it open -- ten process spawns a second, each one a
@@ -299,6 +310,7 @@ def status():
     mode = current_mode(states)
     out = {"mode": mode, "teleop_port": TELEOP_PORT, "nav": NAV.snapshot(),
            "health": rover_health.snapshot() if rover_health else {},
+           "ai": states.get(AI_UNIT, "unknown").startswith("active"),
            "units": {}}
     for key, m in MODES.items():
         out["units"][key] = [unit_state(u, states) for u in m["units"]]
@@ -335,6 +347,26 @@ PAGE = """<!doctype html>
   .sub { color:var(--dim); font-size:.85rem; margin:0 0 1.6rem; }
   .wrap { width:100%; max-width:26rem; }
 
+  .airow {
+    display:flex; align-items:center; justify-content:space-between;
+    gap:1rem; padding:.75rem .9rem; margin-bottom:.9rem;
+    background:var(--card); border:1px solid var(--edge); border-radius:12px;
+  }
+  .ailabel { font-size:.9rem; }
+  .aihint { color:var(--dim); font-size:.75rem; margin-top:.15rem; }
+  .switch {
+    flex:none; width:52px; height:30px; border-radius:999px; cursor:pointer;
+    background:#2a2f3d; border:1px solid var(--edge); padding:0;
+    transition:background .18s ease;
+  }
+  .switch span {
+    display:block; width:22px; height:22px; border-radius:50%;
+    background:#8b93a7; margin:3px; transition:transform .18s ease,
+    background .18s ease;
+  }
+  .switch[aria-pressed="true"] { background:#1f6f43; border-color:#2c8f59; }
+  .switch[aria-pressed="true"] span { transform:translateX(22px); background:#eaf5ee; }
+  .switch:disabled { opacity:.5; cursor:default; }
   #health {
     display:flex; gap:.5rem; margin:-.4rem 0 1rem; flex-wrap:wrap;
   }
@@ -460,6 +492,13 @@ PAGE = """<!doctype html>
   <div id="cards"></div>
 
   <div id="rooms" hidden>
+    <div class="airow">
+      <div>
+        <div class="ailabel">Talk to it</div>
+        <div class="aihint" id="aihint"></div>
+      </div>
+      <button id="aitog" class="switch" aria-pressed="false"><span></span></button>
+    </div>
     <div class="rhead"><span>Send it to a room</span>
       <button id="rstop" hidden>Stop</button></div>
     <div class="grid" id="rgrid"></div>
@@ -542,10 +581,38 @@ const SAID = {
   failed:   r => [`Could not reach ${r}.`, 1],
 };
 
+let aiBusy = false;
+
+document.getElementById('aitog').onclick = async () => {
+  if (aiBusy) return;
+  aiBusy = true;
+  const el = document.getElementById('aitog');
+  const want = el.getAttribute('aria-pressed') !== 'true';
+  el.setAttribute('aria-pressed', want ? 'true' : 'false');   // answer the tap now
+  document.getElementById('aihint').textContent =
+    want ? 'starting...' : 'stopping...';
+  try { await fetch('/api/ai/' + (want ? 'on' : 'off'), {method:'POST'}); }
+  catch (e) {}
+  aiBusy = false;
+  poll();
+};
+
 function paintRooms(st) {
   const box = document.getElementById('rooms');
   box.hidden = st.mode !== 'auto' || !ROOMS.length;
   if (box.hidden) { going = false; return; }
+
+  // The AI and the room buttons are exclusive on purpose. While it is
+  // listening it owns where the rover goes, and a tapped room would be a
+  // second thing sending goals; while it is off nothing reaches Groq at all.
+  const ai = !!st.ai;
+  const aitog = document.getElementById('aitog');
+  if (!aiBusy) {
+    aitog.setAttribute('aria-pressed', ai ? 'true' : 'false');
+    document.getElementById('aihint').textContent = ai
+      ? 'listening \u2014 say where to go'
+      : 'off \u2014 use the buttons below';
+  }
 
   const nav = st.nav || {phase:'idle'};
   // Locked for exactly as long as rover_nav.py is alive. 'stopping' is one
@@ -553,12 +620,16 @@ function paintRooms(st) {
   // moving until it does.
   going = ['sending', 'driving', 'stopping'].includes(nav.phase);
   document.getElementById('rstop').hidden = !going;
+  // Turning the AI off mid-drive would leave a goal running with the buttons
+  // about to unlock underneath it.
+  aitog.disabled = going;
 
   document.querySelectorAll('.room').forEach(el => {
     const mine = el.dataset.room === nav.room;
-    // Locked out while it drives, and until nav2 is actually up: a goal sent
-    // before then is refused, which reads as the button being broken.
-    el.disabled = going || !st.ready;
+    // Locked out while it drives, until nav2 is actually up (a goal sent
+    // before then is refused, which reads as the button being broken), and
+    // whenever the AI is listening.
+    el.disabled = going || !st.ready || ai;
     el.classList.toggle('going', going && mine);
     el.classList.toggle('here', !going && mine && nav.phase === 'arrived');
     el.querySelector('.dist').textContent =
@@ -718,7 +789,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._goto(self.path.rsplit("/", 1)[-1])
         if self.path == "/api/nav/stop":
             return self._reply(*NAV.stop())
+        if self.path in ("/api/ai/on", "/api/ai/off"):
+            return self._ai(self.path.endswith("/on"))
         self._send(404, "not found", "text/plain")
+
+    def _ai(self, on):
+        """Start or stop rover-ai. Off is the point: a stopped voice loop
+        sends nothing to Groq at all, where a listening one transcribes every
+        burst of motor noise before deciding to ignore it."""
+        if current_mode() != "auto":
+            return self._reply(False, "not in autonomous mode")
+        # Never leave a goal running with nobody watching it. Turning the AI
+        # on is what locks the room buttons, so anything they started has to
+        # be stopped first, in the way that reaches Nav2.
+        if on:
+            NAV.stop()
+        code, out = systemctl("start" if on else "stop", "--no-block",
+                              "rover-ai.service", root=True)
+        _cache.update(at=0.0, states=None)   # reflect it on the next poll
+        self._reply(code == 0, out, code=200 if code == 0 else 500)
 
     def _switch(self, key):
         if key not in MODES:
