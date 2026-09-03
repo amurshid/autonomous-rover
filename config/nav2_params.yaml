@@ -4,7 +4,16 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 10
-    default_server_timeout: 20
+    # Milliseconds the tree waits for a server to *acknowledge* a goal
+    # request -- patience, not behaviour. At 20 it lost a goal that was
+    # working: three paths planned, the rover driving, then within 270ms
+    # compute_path_to_pose, spin, wait, backup and a costmap service all
+    # timed out at once and the goal aborted. The servers were fine --
+    # "spin completed successfully" four seconds later. They just could not
+    # answer inside 20ms on a Pi with ordinary scheduling jitter.
+    #
+    # Costs nothing when a server answers promptly, which is nearly always.
+    default_server_timeout: 200
     transform_tolerance: 0.5
 
 controller_server:
