@@ -4,8 +4,14 @@
 Cartographer publishes a pose from the moment it starts, whether that pose
 means anything or not, and there is no "converged" flag to read. What is
 observable is the moment its global localization finds a match: /tracked_pose
-jumps discontinuously -- often by metres -- and then holds. Measured once at
-5.66 m, after ten minutes of sitting on a seeded pose.
+jumps discontinuously -- often by metres -- and then holds.
+
+How long that takes depends entirely on the seed. Nothing publishes to
+/initialpose at boot, so Cartographer starts at the map origin and searches
+the whole map: measured at 167s, jumping 7.89 m to x=1.55 y=7.73 -- which is
+7.88 m from the origin, i.e. the entire correction. From a seed near the truth
+it is seconds instead. Hence the 300s default; the unseeded case has been
+observed at 167s and there is no margin in guessing tighter.
 
 So this watches for a jump, confirms it holds still afterwards, prints where
 it landed and exits. Nothing runs afterwards; the Pi has better uses for a
@@ -51,13 +57,26 @@ class Watcher(Node):
         self.anchor = None        # where it landed after the jump
         self.anchored_at = None
         self.result = None        # 0 settled, 2 timed out
+        self.poses = 0
+        self.reported = 0.0
         self.create_subscription(PoseStamped, '/tracked_pose', self.on_pose, 1)
         self.create_timer(1.0, self.on_tick)
         print(f'watching /tracked_pose for a jump over {JUMP_M} m '
               f'(timeout {timeout:.0f}s, keep the rover still)', flush=True)
 
     def on_tick(self):
-        if self.result is None and time.time() - self.started > self.timeout:
+        # An unseeded search runs for minutes. Silence for that long reads as a
+        # hang, and the temptation is then to kill it just before it works.
+        waited = time.time() - self.started
+        if (self.result is None and self.anchor is None
+                and waited - self.reported >= 15.0):
+            self.reported = waited
+            if self.poses:
+                print(f'  {waited:.0f}s, still searching', flush=True)
+            else:
+                print(f'  {waited:.0f}s, no /tracked_pose yet '
+                      f'-- is cartographer up?', flush=True)
+        if self.result is None and waited > self.timeout:
             print('no jump seen. Either it was already right, or it has not '
                   'found itself yet -- drive it a little and watch again.',
                   flush=True)
@@ -68,6 +87,7 @@ class Watcher(Node):
         if now - self.last_sample < SAMPLE_S:
             return
         self.last_sample = now
+        self.poses += 1
         p = (msg.pose.position.x, msg.pose.position.y)
 
         if self.previous is None:
@@ -97,8 +117,8 @@ class Watcher(Node):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--timeout', type=float, default=180.0,
-                    help='seconds to wait for a jump (default 180)')
+    ap.add_argument('--timeout', type=float, default=300.0,
+                    help='seconds to wait for a jump (default 300)')
     args = ap.parse_args()
 
     rclpy.init()

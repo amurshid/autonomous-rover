@@ -72,7 +72,20 @@ nothing pulls it into a boot. Putting it back means restoring that line and
 enabling the unit.
 
 So finding itself is Cartographer's job now, through its own global
-localization, and it takes about a minute. Nav2 comes up before that finishes.
+localization -- and with nothing publishing to `/initialpose` at boot it
+starts from the map origin and searches the whole map. Measured at **167s**,
+a 7.89 m jump to x=1.55 y=7.73, which is 7.88 m from the origin: the entire
+correction. `wait_for_localisation.py` reports when it lands.
+
+That number is the price of taking the camera relocaliser out, and the way to
+get it back is a seed, not more patience -- from a pose near the truth
+Cartographer refines in seconds. Publishing one at boot means committing to
+parking the rover in a known spot, since a confident wrong seed is worse than
+no seed: `start_localization.sh` asserts the mark in the work room and
+measured 5.66 m wrong on an ordinary boot. Unseeded and slow is the safe
+default, which is why it is the one in place.
+
+Nav2 comes up before that finishes.
 That is harmless in itself -- Nav2 does nothing until given a goal -- but a
 goal sent inside that first minute is planned from a pose Cartographer has not
 settled on yet. Give it a minute after the mode page goes green, or check
