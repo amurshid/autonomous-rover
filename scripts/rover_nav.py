@@ -43,7 +43,7 @@ from rooms import ROOMS, resolve_room  # noqa: E402
 
 
 class RoverNav(Node):
-    def __init__(self, on_done=None):
+    def __init__(self, on_done=None, track_pose=True):
         super().__init__("rover_nav")
         self.cb = ReentrantCallbackGroup()
         self.on_done = on_done
@@ -53,11 +53,21 @@ class RoverNav(Node):
             self, NavigateToPose, "navigate_to_pose", callback_group=self.cb
         )
 
-        # Cartographer publishes this at ~192 Hz. The callback below is a bare
-        # assignment on purpose -- do not do TF lookups or any real work here.
-        self.create_subscription(
-            PoseStamped, "/tracked_pose", self._pose_cb, 10, callback_group=self.cb
-        )
+        # Cartographer publishes this at ~192 Hz, and 192 rclpy callbacks a
+        # second is most of a core on this Pi -- measured at 86% in the goal
+        # sender, which starved Nav2 badly enough that bt_navigator could not
+        # hold its tick rate and goals failed. Only callers that actually read
+        # the pose should pay for it: pose() and nearest_room() are the only
+        # readers, and neither is used when sending a goal from the CLI.
+        #
+        # The callback is a bare assignment on purpose -- no TF lookups, no
+        # real work.
+        self.tracking_pose = track_pose
+        if track_pose:
+            self.create_subscription(
+                PoseStamped, "/tracked_pose", self._pose_cb, 10,
+                callback_group=self.cb
+            )
 
         # Goals sent by another process are invisible in _target: the mode
         # page's room buttons run rover_nav.py as their own child, so rover_ai
@@ -91,6 +101,7 @@ class RoverNav(Node):
         self._pose = (msg.pose.position.x, msg.pose.position.y, yaw)
 
     def pose(self):
+        """(x, y, yaw_deg), or None -- also None when track_pose was off."""
         return self._pose
 
     def is_navigating(self):
@@ -279,7 +290,10 @@ def main():
         done.set()
 
     rclpy.init()
-    node = RoverNav(on_done=report)
+    # No pose subscription: this path sends a goal and reports on it. Progress
+    # comes from Nav2's own action feedback, not from /tracked_pose, and
+    # nothing here calls pose() or nearest_room().
+    node = RoverNav(on_done=report, track_pose=False)
     ex = MultiThreadedExecutor()
     ex.add_node(node)
     threading.Thread(target=ex.spin, daemon=True).start()

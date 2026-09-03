@@ -49,6 +49,19 @@ scripts sourced, and reads a line of JSON per event back:
     {"event": "feedback", "room": "kitchen", "remaining": 4.02}
     {"event": "done",     "room": "kitchen", "outcome": "arrived", "detail": ""}
 
+That child does not subscribe to `/tracked_pose` (`track_pose=False`).
+Cartographer publishes it at ~192 Hz, and 192 rclpy callbacks a second is
+most of a core here -- it measured **86%** in the goal sender, next to
+Cartographer at 69% and Nav2's servers at ~70%, on four cores. Nav2 lost:
+`bt_navigator` could not hold its tick rate, timed out waiting for its own
+action servers to acknowledge goals, and ran recovery behaviours that look
+like the rover having a seizure. The same goal sent by hand, with no child
+running, succeeded.
+
+Nothing in that path reads the pose. Progress comes from Nav2's action
+feedback, and `pose()` and `nearest_room()` are only called by `rover_ai`,
+which keeps the subscription.
+
 One child at a time, and the page locks every other room button while it
 lives -- two goals in flight would just have Nav2 preempt one with the other,
 which is not what tapping a second room looks like it should do. Stop sends
