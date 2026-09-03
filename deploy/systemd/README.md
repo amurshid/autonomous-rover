@@ -265,6 +265,28 @@ Percentage is a straight line between 9.9 V and 12.6 V, overridable with
 `ROVER_V_EMPTY` / `ROVER_V_FULL`. It is not a discharge curve and it reads low
 under load: it answers "does this need charging soon", nothing finer.
 
+## Giving Nav2 room
+
+`Behavior Tree tick rate 100.00 was exceeded` is not a CPU shortage. Measured
+with everything up and a goal running, the Pi sits at roughly **180% of 400%**
+-- two cores idle. The warning is a *latency* one: the tree asks to be woken
+every 10ms, and any other runnable thread can delay that wake on a
+non-realtime kernel however idle the machine is.
+
+So the lever is priority, not capacity. `rover-mode` runs at `Nice=10` and
+`rover-ai` at `Nice=5`; a web page and a voice loop have no deadline, a
+control loop does. The child spawned for a room button inherits the page's
+nice value, which is the one that matters -- it is the second-largest process
+on the machine while a goal is running.
+
+Nothing else is niced. The bridge ticks the motors at 20 Hz, the lidar and
+Cartographer feed everything downstream, and Nav2 is the thing being
+protected.
+
+Expect *some* gap against running the stack by hand: systemd is also running
+the mode page, and a goal sent from it adds a process that a manual
+`ros2 topic pub` does not.
+
 ## When something fails
 
 Long-running units restart themselves: the drivers (`bridge`, `lidar`,
