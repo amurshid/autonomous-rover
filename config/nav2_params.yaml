@@ -3,20 +3,8 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: /odom
-    # Both raised for a Pi 5 that runs Cartographer, Nav2 and the bridge on
-    # four cores. At 10ms the tree could not keep up and said so continuously
-    # -- thousands of "tick rate 100.00 was exceeded" lines that buried the
-    # message explaining why a goal actually failed. 20ms is still 50 Hz,
-    # five times the 10 Hz controller_frequency below, so nothing reacts
-    # slower; it just stops asking for a rate this board cannot serve.
-    bt_loop_duration: 20
-    # How long the tree waits for a server to acknowledge a goal request.
-    # 20ms is optimistic under load: "Timed out while waiting for action
-    # server to acknowledge goal request for compute_path_to_pose" is that
-    # deadline expiring, not a planner that is broken, and the tree then
-    # cleared costmaps and ran recoveries for no reason. This is a patience
-    # setting, so a larger value costs nothing when the server is healthy.
-    default_server_timeout: 200
+    bt_loop_duration: 10
+    default_server_timeout: 20
     transform_tolerance: 0.5
 
 controller_server:
