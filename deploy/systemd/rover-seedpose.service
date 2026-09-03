@@ -1,0 +1,40 @@
+[Unit]
+Description=Seed Cartographer with the rover's parking spot
+# The bridge must be listening before this publishes: /initialpose is volatile
+# QoS, so a pose sent to nobody is dropped without an error and Cartographer
+# searches the map as if nothing had been sent. seed_pose.py waits for a
+# subscriber; this ordering just means it does not have to wait long.
+After=rover-initialpose.service
+Requires=rover-initialpose.service
+# Nav2 planning from the origin while Cartographer is still searching is the
+# thing this exists to avoid, so get the pose in first.
+Before=rover-nav2.service
+
+# WantedBy only starts; PartOf is what makes "systemctl stop rover.target"
+# stop this too. A Cartographer restart also brings this down and back:
+# Cartographer returns on a default pose, and the seed has to be re-asserted
+# or everything downstream works from the origin again.
+PartOf=rover.target rover-cartographer.service
+
+[Service]
+# oneshot: it publishes one pose and exits. RemainAfterExit lets Nav2's
+# Before= mean "after this has finished", not "after it has started".
+Type=oneshot
+RemainAfterExit=yes
+User=amurshid
+WorkingDirectory=/home/amurshid
+# print() to a pipe is block-buffered, so under systemd the log
+# arrives in 4KB chunks or not until exit. These scripts say what
+# they are doing through print(); unbuffered is what makes
+# journalctl -f usable.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec python3 /home/amurshid/seed_pose.py --room work_room'
+# Exit 3 = nobody subscribed to /initialpose. That must not stop the boot:
+# without a seed Cartographer still finds itself, it just takes minutes.
+SuccessExitStatus=3
+TimeoutStartSec=90
+
+[Install]
+WantedBy=rover.target

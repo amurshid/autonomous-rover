@@ -78,8 +78,11 @@ mode.
 
 ## The dependency chain
 
-    rover-bridge ─────────────────────────────────────────────┐
-    rover-lidar ──> rover-cartographer ──> rover-initialpose ─┴──> rover-nav2
+    rover-bridge ──────────────────────────────────────────────┐
+    rover-lidar ──> rover-cartographer ──> rover-initialpose      │
+                                                   │              │
+                                                   ▼              │
+                                            rover-seedpose ───────┴──> rover-nav2
                                                                           │
                                                                           ▼
                                                                        rover-ai
@@ -90,21 +93,32 @@ Cartographer up, or `vpr_relocalise.py` by hand -- but it has no `WantedBy`, so
 nothing pulls it into a boot. Putting it back means restoring that line and
 enabling the unit.
 
-So finding itself is Cartographer's job now, through its own global
-localization -- and with nothing publishing to `/initialpose` at boot it
-starts from the map origin and searches the whole map. Measured at **167s**,
-a 7.89 m jump to x=1.55 y=7.73, which is 7.88 m from the origin: the entire
-correction. `wait_for_localisation.py` reports when it lands.
+Finding itself is Cartographer's job now, and unseeded it did that by
+searching the whole map from the origin: measured at **167s**, a 7.89 m jump
+to x=1.55 y=7.73, which is 7.88 m from the origin -- the entire correction.
 
-That number is the price of taking the camera relocaliser out, and the way to
-get it back is a seed, not more patience -- from a pose near the truth
-Cartographer refines in seconds. Publishing one at boot means committing to
-parking the rover in a known spot, since a confident wrong seed is worse than
-no seed: `start_localization.sh` asserts the mark in the work room and
-measured 5.66 m wrong on an ordinary boot. Unseeded and slow is the safe
-default, which is why it is the one in place.
+`rover-seedpose` removes that wait by asserting the work room from `rooms.py`
+before Nav2 starts. From a pose near the truth Cartographer refines in
+seconds rather than searching. The rover settled 0.86 m from that assertion
+on the boot measured above, which is well inside what the scan matcher pulls
+in.
 
-Nav2 comes up before that finishes.
+**This is only right if the rover is parked in the work room.** A confident
+wrong seed is worse than none -- the same assertion measured 5.66 m wrong on
+an ordinary boot -- and what you get then is not a slow fix but a wrong answer
+held confidently, because the scan matcher will keep any pose that looks
+locally consistent. Park it on the mark. If you did not, seed the truth
+instead:
+
+    python3 ~/seed_pose.py --pose 1.55 7.73 -110
+    python3 ~/seed_pose.py --room entrance
+
+Note that `wait_for_localisation.py` watches for the *jump* global
+localization makes, and a correctly seeded rover never jumps. It will report a
+timeout, and here that means the seed was good. Check `/tracked_pose` rather
+than waiting for a jump that should not come.
+
+Nav2 comes up before Cartographer has settled either way.
 That is harmless in itself -- Nav2 does nothing until given a goal -- but a
 goal sent inside that first minute is planned from a pose Cartographer has not
 settled on yet. Give it a minute after the mode page goes green, or check
@@ -135,7 +149,7 @@ none appears.
     sudo systemctl daemon-reload
     sudo systemctl enable rover.target
     sudo systemctl enable rover-bridge rover-lidar rover-cartographer \
-         rover-initialpose rover-nav2 rover-ai
+         rover-initialpose rover-seedpose rover-nav2 rover-ai
     sudo systemctl enable rover-camera rover-teleop rover-mode
 
 **Use `reenable`, not `enable`, when a unit's `[Install]` section has moved.**
@@ -273,4 +287,5 @@ than the marked spot and Cartographer's scan matcher then held it to 4 cm.
 
 ## Still missing
 
-Nothing. All eight units are here.
+Nothing. All nine boot units are here, plus `rover-relocalise`, which is
+installed but deliberately outside the boot.
