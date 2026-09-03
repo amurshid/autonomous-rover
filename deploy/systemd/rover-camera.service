@@ -3,11 +3,20 @@ Description=Pi camera (/camera/image_raw)
 After=network-online.target
 Wants=network-online.target
 
+# Remote control only. It used to sit in the shared target because both
+# modes needed it, but the autonomous consumer was the camera relocaliser and
+# that is out of the deployment -- nothing in autonomous reads
+# /camera/image_raw any more, so it was encoding frames for nobody at ~28% of
+# a core on a Pi that throttles at 80 C. The cost of moving it is the
+# auto-exposure settling again on each switch into remote control, which is
+# paid once per switch instead of continuously.
+#
+# Starting rover-relocalise or running vpr_logger.py by hand still works: that
+# unit has Requires=rover-camera.service and pulls this up wherever it lives.
+#
 # WantedBy only starts; PartOf is what makes "systemctl stop
-# rover-common.target" stop this too. It is in the shared
-# target because both modes need it: a mode switch must not
-# cycle the motors or make the camera settle again.
-PartOf=rover-common.target
+# rover-teleop.target" stop this too.
+PartOf=rover-teleop.target
 
 [Service]
 Type=simple
@@ -24,4 +33,4 @@ Restart=always
 RestartSec=3
 
 [Install]
-WantedBy=rover-common.target
+WantedBy=rover-teleop.target

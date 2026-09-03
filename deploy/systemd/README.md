@@ -9,17 +9,26 @@ it is before you send it anywhere.
 The rover runs one of two, never both -- Nav2 and a human must not both be
 publishing `/cmd_vel`:
 
-    rover-common.target      motors + camera, shared by both
+    rover-common.target      motors, shared by both
         |
         +-- rover.target          autonomous: lidar, cartographer,
         |                         nav2, voice
         |
-        +-- rover-teleop.target   remote control: the teleop page
+        +-- rover-teleop.target   remote control: teleop page + camera
 
 `Conflicts=` between the two mode targets is what makes them exclusive:
-starting either stops the other, with no sequencing to remember. The motors and
-camera sit outside both, so a switch does not cycle them -- no motor glitch, and
-the camera's auto-exposure does not have to settle again.
+starting either stops the other, with no sequencing to remember. The motors sit
+outside both, so a switch never cycles them and the rover cannot glitch into
+motion while changing modes.
+
+The camera used to sit there too, for the same reason. It does not any more:
+the only thing reading `/camera/image_raw` under autonomous was the camera
+relocaliser, and that is out of the deployment, so it was encoding frames for
+nobody at roughly 28% of a core -- on a board that throttles at 80 C and had
+already starved teleop once. The price is the auto-exposure settling again on
+each switch into remote control, paid once per switch rather than continuously.
+`rover-relocalise` and `vpr_logger.py` still work by hand: that unit has
+`Requires=rover-camera.service` and pulls the camera up wherever it lives.
 
 `rover-mode.service` serves the switcher page on **port 80**, so the whole
 address is `http://ahnaf-pi.local`. It belongs to neither mode and runs always:
@@ -70,7 +79,6 @@ mode.
 ## The dependency chain
 
     rover-bridge ─────────────────────────────────────────────┐
-    rover-camera ─────────────────────────────────────────────┤
     rover-lidar ──> rover-cartographer ──> rover-initialpose ─┴──> rover-nav2
                                                                           │
                                                                           ▼
@@ -126,9 +134,9 @@ none appears.
     sudo cp *.service *.target /etc/systemd/system/
     sudo systemctl daemon-reload
     sudo systemctl enable rover.target
-    sudo systemctl enable rover-bridge rover-lidar rover-camera \
-         rover-cartographer rover-initialpose rover-nav2 rover-ai
-    sudo systemctl enable rover-teleop rover-mode
+    sudo systemctl enable rover-bridge rover-lidar rover-cartographer \
+         rover-initialpose rover-nav2 rover-ai
+    sudo systemctl enable rover-camera rover-teleop rover-mode
 
 **Use `reenable`, not `enable`, when a unit's `[Install]` section has moved.**
 `enable` leaves an existing symlink alone, so a unit enabled under an older
