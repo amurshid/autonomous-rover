@@ -82,6 +82,19 @@ spoken one, so the rover says where it is going and announces arrival either
 way. The cost is that room buttons need `rover-ai` up; the page already waits
 for it, since it is in the autonomous checklist.
 
+The page polls `/api/status` every 1.2s while a phone has it open, and that
+reply used to cost twelve `systemctl is-active` calls -- one per unit, two per
+target. Twelve forks per poll is **ten process spawns a second**, each a round
+trip to systemd, for as long as anyone is looking at the page.
+
+That is enough to starve Nav2 on this Pi. The same goal that succeeds when the
+stack is run by hand fails through the page, with `bt_navigator` missing its
+tick rate and reporting `Timed out while waiting for action server to
+acknowledge goal request` -- not a logic fault, just no CPU to answer in.
+`is-active` accepts a list, so one call now answers for everything, cached for
+0.6s so several phones cost one call rather than one each: twelve invocations
+per poll down to one.
+
 Starting a target needs root, so `rover-mode.sudoers` grants that user exactly
 two `systemctl start` commands and `is-active`. Not blanket sudo: a page
 reachable from the home network should not be able to do more than change the

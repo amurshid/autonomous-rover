@@ -28,6 +28,7 @@ import os
 import socket
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("ROVER_MODE_PORT", "80"))
@@ -116,17 +117,56 @@ def systemctl(*args, root=False):
         return 1, str(e)
 
 
-def unit_state(unit):
+# Every name the page ever asks about, in a fixed order so one systemctl
+# call answers all of them.
+_WATCHED = ([m["target"] for m in MODES.values()]
+            + [f"{u}.service" for m in MODES.values() for u in m["units"]])
+
+# Asking per unit meant twelve forks per poll, and the page polls every 1.2s
+# whenever a phone has it open -- ten process spawns a second, each one a
+# round trip to systemd. That is enough to starve Nav2 on this Pi: goals that
+# succeed when the stack is run by hand fail through the page, with
+# bt_navigator missing its tick rate and timing out waiting for action servers
+# to acknowledge a goal. is-active takes a list, so one call answers them all.
+_cache = {"at": 0.0, "states": None}
+_cache_lock = threading.Lock()
+CACHE_S = 0.6
+
+
+def all_states():
+    """{name: state} for everything in _WATCHED, from a single systemctl.
+
+    Briefly cached so several phones, or a poll landing on top of a switch,
+    cost one call rather than one each.
+    """
+    now = time.monotonic()
+    with _cache_lock:
+        if _cache["states"] is not None and now - _cache["at"] < CACHE_S:
+            return _cache["states"]
+    code, out = systemctl("is-active", *_WATCHED)
+    lines = out.splitlines()
+    # One line per argument, in order. Anything else and we cannot line them
+    # up, so report unknown rather than attributing a state to the wrong unit.
+    if len(lines) == len(_WATCHED):
+        states = dict(zip(_WATCHED, lines))
+    else:
+        states = {name: "unknown" for name in _WATCHED}
+    with _cache_lock:
+        _cache.update(at=now, states=states)
+    return states
+
+
+def unit_state(unit, states=None):
     """active / activating / inactive / failed. A oneshot that has finished
     reports 'active' with sub-state 'exited', which is success, not a hang."""
-    code, out = systemctl("is-active", f"{unit}.service")
-    return out.splitlines()[0] if out else "unknown"
+    states = states if states is not None else all_states()
+    return states.get(f"{unit}.service", "unknown")
 
 
-def current_mode():
+def current_mode(states=None):
+    states = states if states is not None else all_states()
     for key, m in MODES.items():
-        code, out = systemctl("is-active", m["target"])
-        if out.startswith("active"):
+        if states.get(m["target"], "").startswith("active"):
             return key
     return None
 
@@ -255,12 +295,13 @@ NAV = Navigator()
 
 
 def status():
-    mode = current_mode()
+    states = all_states()          # one systemctl for the whole reply
+    mode = current_mode(states)
     out = {"mode": mode, "teleop_port": TELEOP_PORT, "nav": NAV.snapshot(),
            "health": rover_health.snapshot() if rover_health else {},
            "units": {}}
     for key, m in MODES.items():
-        out["units"][key] = [unit_state(u) for u in m["units"]]
+        out["units"][key] = [unit_state(u, states) for u in m["units"]]
     ready = False
     if mode == "teleop":
         ready = teleop_answering()
