@@ -186,11 +186,27 @@ Both web pages show the Pi's temperature, read from the thermal zone, amber at
 70 C and red at 80 C -- the point it throttles, which this project has hit at
 83.8 C while starving the teleop stream.
 
-Battery voltage takes a longer route. The board reports it on the same serial
-line as everything else, and `wave_rover_bridge.py` owns that port -- a second
-reader would split the stream between them. So the bridge parses it on its own
-thread and writes `/run/rover/telemetry.json`, which both pages stat. That is
-also why it is a file and not a topic: the mode page has no ROS by design.
+Battery voltage takes a longer route. The board answers rather than
+volunteers -- nothing arrives on the port until `{"T":130}` asks -- and it
+replies with everything at once:
+
+    {"T":1001,"L":0,"R":0,...,"temp":56.11,"v":11.38}
+
+`v` is the battery. `temp` there is the driver board, not the Pi, and the two
+are not interchangeable: the pages show the Pi's own thermal zone, which is
+the one that throttles.
+
+`wave_rover_bridge.py` owns that port -- a second reader would split the
+stream between them -- so the request goes out on the existing tick timer,
+once a second, keeping every serial write on one thread. The reply is parsed
+on its own thread and left in `/run/rover/telemetry.json`, which both pages
+stat. That is also why it is a file and not a topic: the mode page has no ROS
+by design.
+
+The `in_waiting > 4096` flush in `tick()` predates this and is now a safety
+valve for a telemetry thread that has died, not a routine drain -- with the
+reader running the buffer never approaches it, and flushing would corrupt the
+line being read.
 
 `RuntimeDirectory=rover` on the bridge creates that directory owned by the
 service user and removes it when the unit stops, which is the behaviour you

@@ -27,6 +27,7 @@ class WaveRoverBridge(Node):
         self.declare_parameter('tick_hz', 20.0)
         self.declare_parameter('left_trim', 1.0)
         self.declare_parameter('right_trim', 1.0)
+        self.declare_parameter('telemetry_period', 1.0)
 
         g = self.get_parameter
         port = g('serial_port').value
@@ -46,6 +47,12 @@ class WaveRoverBridge(Node):
         self.hold = {'l': 0, 'r': 0}
         self.left_trim = g('left_trim').value
         self.right_trim = g('right_trim').value
+        # The board answers, it does not volunteer: nothing arrives on the
+        # port until {"T":130} asks for it. Counted in ticks so the request
+        # goes out from the same thread as the motor writes.
+        self.telemetry_every = max(
+            1, int(round(g('telemetry_period').value * self.tick_hz)))
+        self.ticks = 0
 
         self.lock = threading.Lock()
         self.left = 0.0
@@ -77,6 +84,9 @@ class WaveRoverBridge(Node):
 
     # Whatever the firmware calls it. 'v' is what the Waveshare general
     # driver board emits; the rest cost nothing to accept.
+    # Confirmed against this board: {"T":1001,...,"temp":56.1,"v":11.38}.
+    # 'temp' there is the driver board, not the Pi -- rover_health.py reads
+    # the Pi's own thermal zone and they are not interchangeable.
     VOLTAGE_KEYS = ('v', 'V', 'volt', 'voltage', 'bat', 'battery')
     # A 3S pack reads about 9-13 V. Anything outside this is another field
     # that happened to be called v, not the battery.
@@ -194,10 +204,17 @@ class WaveRoverBridge(Node):
             l = self.dither(self.left, self.floor, 'l')
             r = self.dither(self.right, self.floor, 'r')
 
+        # A safety valve for a telemetry thread that has died: with one
+        # running the buffer never gets near this, and flushing mid-line
+        # would corrupt the read it is in the middle of.
         if self.ser.in_waiting > 4096:
             self.ser.reset_input_buffer()
 
         self.send(l, r)
+
+        self.ticks += 1
+        if self.ticks % self.telemetry_every == 0:
+            self.ask_for_telemetry()
 
     def send(self, l, r):
         payload = json.dumps({"T": 1, "L": round(l, 3), "R": round(r, 3)})
@@ -205,6 +222,15 @@ class WaveRoverBridge(Node):
             self.ser.write((payload + '\n').encode('utf-8'))
         except serial.SerialException as e:
             self.get_logger().error(f'Serial write failed: {e}')
+
+    def ask_for_telemetry(self):
+        """Request one feedback line. The reply arrives on the reader thread."""
+        try:
+            self.ser.write((json.dumps({"T": 130}) + '\n').encode('utf-8'))
+        except serial.SerialException as e:
+            if not getattr(self, '_poll_warned', False):
+                self._poll_warned = True
+                self.get_logger().warn(f'telemetry poll failed: {e}')
 
     def destroy_node(self):
         try:
