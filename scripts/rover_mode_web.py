@@ -72,10 +72,14 @@ MODES = {
         "target": "rover.target",
         "label": "Autonomous",
         "blurb": "Finds itself, drives itself, listens for commands.",
-        "units": ["rover-bridge", "rover-camera", "rover-lidar",
-                  "rover-cartographer", "rover-initialpose",
+        # No camera: nothing reads /camera/image_raw under autonomous since
+        # the relocaliser left, so it runs in remote control only. Listing it
+        # here would make "all active" unreachable and hang the loading
+        # screen at six of seven with the room buttons still locked.
+        "units": ["rover-bridge", "rover-lidar", "rover-cartographer",
+                  "rover-initialpose", "rover-seedpose",
                   "rover-nav2", "rover-ai"],
-        "steps": ["Motors", "Camera", "Lidar", "Map", "Pose bridge",
+        "steps": ["Motors", "Lidar", "Map", "Pose bridge", "Position",
                   "Navigation", "Voice"],
     },
     "teleop": {
