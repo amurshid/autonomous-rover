@@ -50,10 +50,13 @@ except Exception:
 # a wrapping bash would swallow the SIGTERM that cancels the goal. The room
 # arrives as $1 rather than interpolated into the command, so nothing about it
 # reaches the shell as syntax.
+# rover_goto.py hands the room to rover_ai rather than sending the Nav2 goal
+# from here. Same event stream, one owner of navigation: two processes holding
+# goals is how rover_ai came to drive by hand over the top of Nav2.
 NAV_CMD = os.environ.get("ROVER_NAV_CMD") or (
     "source /opt/ros/humble/setup.bash && "
     "source \"$HOME/ros2_ws/install/setup.bash\" && "
-    "exec python3 -u \"$HOME/rover_nav.py\" --json \"$1\""
+    "exec python3 -u \"$HOME/rover_goto.py\" \"$1\""
 )
 
 

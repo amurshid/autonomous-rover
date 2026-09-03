@@ -42,8 +42,8 @@ In autonomous mode the same page also lists the rooms from `rooms.py`, so a
 goal can be sent without speaking to the rover. Sending one *does* need ROS,
 which that process does not have and must not acquire -- importing rclpy into
 the one service that can never fail is the wrong trade. So it runs
-`rover_nav.py --json <room>` as a child, under `bash -lc` with the setup
-scripts sourced, and reads a line of JSON per event back:
+`rover_goto.py <room>` as a child, under `bash -lc` with the setup scripts
+sourced, and reads a line of JSON per event back:
 
     {"event": "sent",     "room": "kitchen", "detail": "..."}
     {"event": "feedback", "room": "kitchen", "remaining": 4.02}
@@ -60,16 +60,27 @@ in the same way, rather than pulling Nav2 out from under a moving rover.
 None of this needs sudo: the child runs as the same unprivileged user, and the
 sudoers rule is still just the two `systemctl start` commands.
 
-That child is invisible to `rover_ai.py`, which matters more than it sounds.
-`is_navigating()` reports whether *this process* has a goal, so a drive
+`rover_goto.py` does not send the goal. It publishes the room on
+`rover/goto_request` and relays what `rover_ai` publishes back on
+`rover/goto_status`, so navigation has one owner.
+
+It used to run `rover_nav.py --json <room>`, which sent the goal from that
+child. `is_navigating()` reports whether *this process* has a goal, so a drive
 started from a room button read as False inside rover_ai: the gate that stops
 it transcribing its own motors stayed open, it invented a command from the
 noise, and its manual `drive` published /cmd_vel alongside Nav2's controller.
 Two publishers at different rates is a rover that shakes and a goal that
 fails. A spoken "stop" could not fix it either -- `cancel()` had no handle for
-someone else's goal. `anyone_navigating()` and `cancel_any()` read Nav2's own
-`navigate_to_pose/_action/status` and cancel-all service instead, which do not
-care which process asked.
+someone else's goal.
+
+Both halves are fixed. Routing through rover_ai removes the second sender, and
+`anyone_navigating()` / `cancel_any()` read Nav2's own
+`navigate_to_pose/_action/status` and cancel-all service, which do not care
+which process asked -- still the right answer for anything else that sends a
+goal, `rover_nav.py` by hand included. A tapped room is now the same path as a
+spoken one, so the rover says where it is going and announces arrival either
+way. The cost is that room buttons need `rover-ai` up; the page already waits
+for it, since it is in the autonomous checklist.
 
 Starting a target needs root, so `rover-mode.sudoers` grants that user exactly
 two `systemctl start` commands and `is-active`. Not blanket sudo: a page

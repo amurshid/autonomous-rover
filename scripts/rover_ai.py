@@ -28,6 +28,8 @@ import urllib.request
 import rclpy
 from rclpy.executors import (ExternalShutdownException,
                              MultiThreadedExecutor)
+from rclpy.node import Node
+from std_msgs.msg import String
 from groq import Groq
 
 sys.path.insert(0, os.path.expanduser('~'))
@@ -592,6 +594,71 @@ class Brain:
         return 'Sorry, I got stuck on that one.'
 
 
+class RemoteRequests(Node):
+    """Room buttons on the mode page, driven through this process.
+
+    The page used to run rover_nav.py as its own child. That worked, but it
+    meant two processes could hold a Nav2 goal and neither could see the
+    other: rover_ai read is_navigating() False for the whole drive, so it
+    answered its own motors and drove by hand over the top of Nav2.
+
+    Routing the buttons here leaves one owner of navigation. A tapped room is
+    now the same code path as a spoken one, which also means the rover says
+    where it is going and announces arrival either way.
+
+    The event stream the page consumes is unchanged -- rover_goto.py relays
+    what is published here, in the shape rover_nav.py --json used to print.
+    """
+
+    def __init__(self, nav, motions):
+        super().__init__('rover_remote_requests')
+        self.nav = nav
+        self.m = motions
+        self.speak = lambda line: None      # replaced once voice exists
+        self.room = None
+        self.pub = self.create_publisher(String, 'rover/goto_status', 10)
+        self.create_subscription(
+            String, 'rover/goto_request', self.on_request, 10)
+        self.create_timer(0.5, self.on_tick)
+
+    def _emit(self, event, **kw):
+        self.pub.publish(String(data=json.dumps({'event': event, **kw})))
+
+    def on_request(self, msg):
+        try:
+            req = json.loads(msg.data)
+        except ValueError:
+            return
+        if req.get('action') == 'cancel':
+            self.nav.cancel_any()
+            self.m.do_stop()
+            room, self.room = self.room, None
+            self._emit('done', room=room, outcome='cancelled', detail='')
+            return
+        room = req.get('room', '')
+        ok, detail = self.nav.go_to_room(room)
+        if not ok:
+            self._emit('done', room=room, outcome='rejected', detail=str(detail))
+            return
+        self.room = self.nav.target() or room
+        self.speak(f'Going to {spoken_name(self.room)}.')
+        self._emit('sent', room=self.room, detail=str(detail))
+
+    def on_tick(self):
+        if self.room is None or not self.nav.is_navigating():
+            return
+        left = self.nav.distance_remaining()
+        if left is not None:
+            self._emit('feedback', room=self.room, remaining=round(left, 2))
+
+    def finished(self, room, outcome, detail):
+        """Called from announce() when a goal settles, whoever sent it."""
+        if self.room is None:
+            return
+        self.room = None
+        self._emit('done', room=room, outcome=outcome, detail=detail or '')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--voice', action='store_true', help='listen on the mic')
@@ -608,8 +675,13 @@ def main():
         from rover_voice import Voice
         voice = Voice(Groq(api_key=os.environ['GROQ_API_KEY']))
 
+    remote_holder = {}
+
     def announce(room, outcome, detail):
         """Fires on an executor thread when a nav goal settles."""
+        r = remote_holder.get('node')
+        if r is not None:
+            r.finished(room, outcome, detail)
         line = {
             'arrived':  f'I have arrived at {spoken_name(room)}.',
             'failed':   f'I could not reach {spoken_name(room)}.',
@@ -624,10 +696,16 @@ def main():
     rclpy.init()
     motions = Motions()
     nav = RoverNav(on_done=announce)
+    remote = RemoteRequests(nav, motions)
     ex = MultiThreadedExecutor()
     ex.add_node(motions)
     ex.add_node(nav)
+    ex.add_node(remote)
     threading.Thread(target=ex.spin, daemon=True).start()
+
+    remote_holder['node'] = remote
+    remote.speak = lambda line: (print(f'\nbot > {line}'),
+                                 voice.say(line) if voice else None)
 
     brain = Brain(motions, nav, voice)
     print(f'Ready ({" -> ".join(MODELS)}). Rooms: {", ".join(ROOM_NAMES)}')
