@@ -33,7 +33,6 @@ not be, since nothing here asks Nav2 anything.
 import argparse
 import math
 import sys
-import time
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
