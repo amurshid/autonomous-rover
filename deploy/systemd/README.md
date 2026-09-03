@@ -51,6 +51,17 @@ in the same way, rather than pulling Nav2 out from under a moving rover.
 None of this needs sudo: the child runs as the same unprivileged user, and the
 sudoers rule is still just the two `systemctl start` commands.
 
+That child is invisible to `rover_ai.py`, which matters more than it sounds.
+`is_navigating()` reports whether *this process* has a goal, so a drive
+started from a room button read as False inside rover_ai: the gate that stops
+it transcribing its own motors stayed open, it invented a command from the
+noise, and its manual `drive` published /cmd_vel alongside Nav2's controller.
+Two publishers at different rates is a rover that shakes and a goal that
+fails. A spoken "stop" could not fix it either -- `cancel()` had no handle for
+someone else's goal. `anyone_navigating()` and `cancel_any()` read Nav2's own
+`navigate_to_pose/_action/status` and cancel-all service instead, which do not
+care which process asked.
+
 Starting a target needs root, so `rover-mode.sudoers` grants that user exactly
 two `systemctl start` commands and `is-active`. Not blanket sudo: a page
 reachable from the home network should not be able to do more than change the

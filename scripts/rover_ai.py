@@ -374,9 +374,11 @@ class Brain:
         return ok, result
 
     def dispatch(self, name, args):
-        # Manual motion and Nav2 both publish /cmd_vel. Never let them overlap.
-        if name in ('spin', 'drive') and self.nav.is_navigating():
-            self.nav.cancel()
+        # Manual motion and Nav2 both publish /cmd_vel. Never let them
+        # overlap -- anyone_navigating(), not is_navigating(), because the mode
+        # page's room buttons send their goals from a separate process.
+        if name in ('spin', 'drive') and self.nav.anyone_navigating():
+            self.nav.cancel_any()
 
         if name == 'run_sequence':
             return self.run_sequence(args.get('steps', []))
@@ -388,7 +390,7 @@ class Brain:
             self.abort_sequence()
 
         if name == 'cancel_navigation':
-            ok, msg = self.nav.cancel()
+            ok, msg = self.nav.cancel_any()
             self.m.do_stop()
             return ok, msg
         if name == 'where_am_i':
@@ -406,7 +408,7 @@ class Brain:
         if name == 'drive':
             return self.m.do_drive(args.get('meters', 0))
         if name == 'stop':
-            self.nav.cancel()
+            self.nav.cancel_any()
             return self.m.do_stop()
         return False, f'unknown tool {name}'
 
@@ -648,7 +650,7 @@ def main():
                 # produced an unasked-for drive and a web search about robots
                 # in space. Only stop-like commands get through while moving,
                 # because that is the one thing worth hearing over the noise.
-                if nav.is_navigating() and not STOP_WORDS.search(heard):
+                if nav.anyone_navigating() and not STOP_WORDS.search(heard):
                     print(f'[ignored while driving: {heard!r}]')
                     continue
                 print(f'\nyou (voice) > {heard}')

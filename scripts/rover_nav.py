@@ -21,12 +21,22 @@ import sys
 import threading
 
 import rclpy
-from action_msgs.msg import GoalStatus
+from action_msgs.msg import GoalStatus, GoalStatusArray
+from action_msgs.srv import CancelGoal
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
+
+try:      # the QoS an action server publishes its status with
+    from rclpy.action.qos import qos_profile_action_status_default as STATUS_QOS
+except ImportError:
+    from rclpy.qos import (QoSDurabilityPolicy, QoSProfile,
+                           QoSReliabilityPolicy)
+    STATUS_QOS = QoSProfile(
+        depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
 
 sys.path.insert(0, os.path.expanduser("~"))
 from rooms import ROOMS, resolve_room  # noqa: E402
@@ -49,6 +59,21 @@ class RoverNav(Node):
             PoseStamped, "/tracked_pose", self._pose_cb, 10, callback_group=self.cb
         )
 
+        # Goals sent by another process are invisible in _target: the mode
+        # page's room buttons run rover_nav.py as their own child, so rover_ai
+        # saw is_navigating() False while Nav2 was driving. Both then published
+        # /cmd_vel and the rover shook. Nav2's own status topic is the one
+        # source that does not care which process asked.
+        self._nav2_active = False
+        self.create_subscription(
+            GoalStatusArray, "navigate_to_pose/_action/status",
+            self._status_cb, STATUS_QOS, callback_group=self.cb)
+        # An empty request -- zero uuid, zero stamp -- cancels every goal,
+        # including one this process never had a handle for.
+        self._cancel_cli = self.create_client(
+            CancelGoal, "navigate_to_pose/_action/cancel_goal",
+            callback_group=self.cb)
+
         self._lock = threading.Lock()
         self._pose = None            # (x, y, yaw_deg)
         self._handle = None          # active goal handle
@@ -69,8 +94,25 @@ class RoverNav(Node):
         return self._pose
 
     def is_navigating(self):
+        """Is *this process* driving? _await_arrival waits on this, so it must
+        not become true for somebody else's goal."""
         with self._lock:
             return self._target is not None
+
+    def _status_cb(self, msg):
+        self._nav2_active = any(
+            st.status in (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
+            for st in msg.status_list)
+
+    def anyone_navigating(self):
+        """Is anything driving, whoever asked? Use this before publishing
+        /cmd_vel by hand, and to decide whether the rover is listening to its
+        own motors. Deliberately not time-limited: status is published on
+        transitions, so a long quiet drive must not look like it ended."""
+        with self._lock:
+            if self._target is not None:
+                return True
+        return self._nav2_active
 
     def target(self):
         with self._lock:
@@ -131,6 +173,21 @@ class RoverNav(Node):
             return False, "not currently navigating"
         handle.cancel_goal_async()
         return True, f"cancelled navigation to {was}"
+
+    def cancel_any(self):
+        """Stop whatever is driving, including a goal from another process.
+
+        "stop" has to mean stop. Without this a spoken stop during a drive
+        started from the mode page cancelled nothing, and the single zero
+        twist that followed was overridden by Nav2 on its next tick.
+        """
+        ok, msg = self.cancel()
+        if ok or not self._nav2_active:
+            return ok, msg
+        if not self._cancel_cli.service_is_ready():
+            return False, "nav2 cancel service unavailable"
+        self._cancel_cli.call_async(CancelGoal.Request())
+        return True, "cancelled navigation"
 
     # ------------------------------------------------------------ callbacks
 
