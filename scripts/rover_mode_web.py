@@ -45,6 +45,13 @@ except Exception:
     def spoken_name(room):
         return room
 
+# Same bargain: a battery readout is worth having, but not at the price of the
+# one page that has to survive everything else being broken.
+try:
+    import rover_health
+except Exception:
+    rover_health = None
+
 # How to run rover_nav.py. A login shell because the ROS setup scripts assume
 # one, and `exec` because the child must be the process this server signals --
 # a wrapping bash would swallow the SIGTERM that cancels the goal. The room
@@ -250,6 +257,7 @@ NAV = Navigator()
 def status():
     mode = current_mode()
     out = {"mode": mode, "teleop_port": TELEOP_PORT, "nav": NAV.snapshot(),
+           "health": rover_health.snapshot() if rover_health else {},
            "units": {}}
     for key, m in MODES.items():
         out["units"][key] = [unit_state(u) for u in m["units"]]
@@ -286,6 +294,16 @@ PAGE = """<!doctype html>
   .sub { color:var(--dim); font-size:.85rem; margin:0 0 1.6rem; }
   .wrap { width:100%; max-width:26rem; }
 
+  #health {
+    display:flex; gap:.5rem; margin:-.4rem 0 1rem; flex-wrap:wrap;
+  }
+  #health span:empty { display:none; }
+  #health span {
+    font-size:.8rem; padding:.2rem .55rem; border-radius:999px;
+    background:var(--card); border:1px solid var(--edge); color:var(--dim);
+  }
+  #health .warn { color:#f0b429; border-color:#6b5416; }
+  #health .bad  { color:#ff6b6b; border-color:#6b2020; }
   .card {
     background:var(--card); border:1px solid var(--edge); border-radius:14px;
     padding:1.1rem 1.2rem; margin-bottom:.9rem; cursor:pointer;
@@ -397,6 +415,7 @@ PAGE = """<!doctype html>
 <div class="wrap">
   <h1>Rover</h1>
   <p class="sub">Pick a mode.</p>
+  <div id="health"><span id="batt"></span><span id="temp"></span></div>
   <div id="cards"></div>
 
   <div id="rooms" hidden>
@@ -436,9 +455,21 @@ function paint(st) {
     el.onclick = () => switchTo(el.dataset.mode));
 }
 
+function paintHealth(h) {
+  if (!h) return;
+  const b = document.getElementById('batt'), t = document.getElementById('temp');
+  b.textContent = h.battery_pct == null ? '' : `${h.battery_pct}%  ${h.volts}V`;
+  b.className = h.battery_pct == null ? ''
+              : h.battery_pct <= 20 ? 'bad' : h.battery_pct <= 40 ? 'warn' : '';
+  t.textContent = h.temp_c == null ? '' : `${h.temp_c}\u00B0C`;
+  t.className = h.temp_state === 'hot' ? 'bad'
+              : h.temp_state === 'warm' ? 'warn' : '';
+}
+
 async function poll() {
   try {
     const st = await (await fetch('/api/status')).json();
+    paintHealth(st.health);
     if (busy) progress(st); else { paint(st); paintRooms(st); }
   } catch (e) { /* the server restarts during a switch; just retry */ }
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import io
+import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,12 @@ display:flex;flex-direction:column;align-items:center;padding:16px;overscroll-be
 h2{margin:4px 0 12px;font-weight:600;font-size:18px}
 #hint{display:none;font-size:12px;color:#9aa3b8;margin-bottom:10px}
 @media (orientation:portrait) and (hover:none){#hint{display:block}}
+#health{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+#health span:empty{display:none}
+#health span{font-size:11px;padding:2px 8px;border-radius:999px;
+  color:#9aa3b8;background:#141821;border:1px solid #232838}
+#health .warn{color:#f0b429;border-color:#6b5416}
+#health .bad{color:#ff6b6b;border-color:#6b2020}
 
 /* Desktop and phone-portrait: camera on top, D-pad below. */
 #app{display:grid;gap:10px;width:100%;max-width:420px;
@@ -97,6 +104,7 @@ bottom:calc(6px + env(safe-area-inset-bottom))}
 </script></head><body>
 <h2>Rover Control</h2>
 <div id="hint">turn your phone sideways for gamepad controls</div>
+<div id="health"><span id="batt"></span><span id="temp"></span></div>
 <div id="app">
   <div id="lpad">
     <button id="lt" data-l="0" data-a="1">&#9664;</button>
@@ -165,6 +173,21 @@ const KEYS={ArrowUp:[1,0],w:[1,0],ArrowDown:[-1,0],s:[-1,0],
 addEventListener('keydown',e=>{const k=KEYS[e.key];if(k&&!held.has(e.key))hold(e.key,k)});
 addEventListener('keyup',e=>release(e.key));
 addEventListener('blur',allStop);
+
+// Battery and Pi temperature. Slow poll: neither moves fast, and this page
+// shares a warm Pi with everything else.
+function health(){
+  fetch('/health').then(r=>r.json()).then(h=>{
+    const b=document.getElementById('batt'),t=document.getElementById('temp');
+    b.textContent = h.battery_pct==null ? '' : h.battery_pct+'%  '+h.volts+'V';
+    b.className = h.battery_pct==null ? ''
+                : h.battery_pct<=20 ? 'bad' : h.battery_pct<=40 ? 'warn' : '';
+    t.textContent = h.temp_c==null ? '' : h.temp_c+'\u00B0C';
+    t.className = h.temp_state==='hot' ? 'bad'
+                : h.temp_state==='warm' ? 'warn' : '';
+  }).catch(()=>{});
+}
+health(); setInterval(health, 10000);
 
 // Camera. /stream is one long multipart response, which is cheap and low
 // latency where it works; some mobile browsers never render it, so a frame
@@ -386,6 +409,14 @@ class Teleop(Node):
         self.pub.publish(msg)
 
 
+# A readout is not worth taking the controls down for, so a missing or
+# broken rover_health leaves the pills blank rather than failing the page.
+try:
+    import rover_health
+except Exception:
+    rover_health = None
+
+
 class Handler(BaseHTTPRequestHandler):
     node = None
     protocol_version = 'HTTP/1.1'
@@ -411,6 +442,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error_empty(503)
             else:
                 self.send_bytes(jpeg, 'image/jpeg')
+        elif u.path == '/health':
+            body = json.dumps(
+                rover_health.snapshot() if rover_health else {}).encode()
+            self.send_bytes(body, 'application/json')
         elif u.path == '/stream':
             self.stream()
         else:
