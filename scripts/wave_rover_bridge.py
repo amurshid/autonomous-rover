@@ -10,6 +10,8 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
 
 
 class WaveRoverBridge(Node):
@@ -27,7 +29,11 @@ class WaveRoverBridge(Node):
         self.declare_parameter('tick_hz', 20.0)
         self.declare_parameter('left_trim', 1.0)
         self.declare_parameter('right_trim', 1.0)
-        self.declare_parameter('telemetry_period', 1.0)
+        # Cartographer wants the IMU faster than the lidar's 10 Hz. Every
+        # tick is 20 Hz, the most this board can give without changing the
+        # tick rate itself.
+        self.declare_parameter('telemetry_period', 0.05)
+        self.declare_parameter('imu_frame', 'base_link')
 
         g = self.get_parameter
         port = g('serial_port').value
@@ -52,7 +58,9 @@ class WaveRoverBridge(Node):
         # goes out from the same thread as the motor writes.
         self.telemetry_every = max(
             1, int(round(g('telemetry_period').value * self.tick_hz)))
+        self.imu_frame = g('imu_frame').value
         self.ticks = 0
+        self.last_file_write = 0.0
 
         self.lock = threading.Lock()
         self.left = 0.0
@@ -65,6 +73,15 @@ class WaveRoverBridge(Node):
         except serial.SerialException as e:
             self.get_logger().error(f'Cannot open {port}: {e}')
             raise SystemExit(1)
+
+        # The board reports orientation, rates and accelerations in the same
+        # line it reports the battery. Cartographer had neither an IMU nor
+        # odometry, which left its pose extrapolator with nothing but scan
+        # matching to predict motion -- and a pose that walked off the map
+        # whenever scan matching was momentarily starved. This is the sensor
+        # that was there all along, on a topic nobody published.
+        self.imu_pub = self.create_publisher(
+            Imu, 'imu/data', qos_profile_sensor_data)
 
         self.create_subscription(Twist, 'cmd_vel', self.cmd_cb, 10)
         self.create_timer(1.0 / self.tick_hz, self.tick)
@@ -92,6 +109,65 @@ class WaveRoverBridge(Node):
     # that happened to be called v, not the battery.
     V_MIN, V_MAX = 5.0, 30.0
 
+    # Board units, confirmed against a level stationary rover: az reads
+    # ~1000.85 with the rover flat, so accelerations are milli-g; gyro rates
+    # sit under 1.0 at rest, which is degrees per second rather than radians
+    # (1 rad/s would be 57 deg/s of noise at standstill); r/p/y are degrees.
+    MG_TO_MS2 = 9.80665 / 1000.0
+    DEG_TO_RAD = math.pi / 180.0
+    FILE_PERIOD_S = 1.0          # battery file: no point rewriting at 20 Hz
+
+    def _publish_imu(self, obj):
+        """Publish one Imu message from a board feedback line.
+
+        Cartographer's 2D use_imu_data reads angular_velocity and
+        linear_acceleration -- gravity for the alignment, the z rate for yaw.
+        Orientation is published because the board offers it, but nothing
+        here depends on it, and on a part this cheap the yaw half drifts.
+        """
+        try:
+            ax, ay, az = float(obj['ax']), float(obj['ay']), float(obj['az'])
+            gx, gy, gz = float(obj['gx']), float(obj['gy']), float(obj['gz'])
+        except (KeyError, TypeError, ValueError):
+            return                       # not a feedback line
+
+        msg = Imu()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.imu_frame
+
+        msg.linear_acceleration.x = ax * self.MG_TO_MS2
+        msg.linear_acceleration.y = ay * self.MG_TO_MS2
+        msg.linear_acceleration.z = az * self.MG_TO_MS2
+        msg.angular_velocity.x = gx * self.DEG_TO_RAD
+        msg.angular_velocity.y = gy * self.DEG_TO_RAD
+        msg.angular_velocity.z = gz * self.DEG_TO_RAD
+
+        try:
+            roll = float(obj['r']) * self.DEG_TO_RAD
+            pitch = float(obj['p']) * self.DEG_TO_RAD
+            yaw = float(obj['y']) * self.DEG_TO_RAD
+        except (KeyError, TypeError, ValueError):
+            # -1 in the first slot is the Imu contract for "no orientation".
+            msg.orientation_covariance[0] = -1.0
+        else:
+            cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+            cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+            cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+            msg.orientation.w = cr * cp * cy + sr * sp * sy
+            msg.orientation.x = sr * cp * cy - cr * sp * sy
+            msg.orientation.y = cr * sp * cy + sr * cp * sy
+            msg.orientation.z = cr * cp * sy - sr * sp * cy
+            msg.orientation_covariance[0] = 0.05
+            msg.orientation_covariance[4] = 0.05
+            msg.orientation_covariance[8] = 0.5      # yaw drifts; say so
+
+        # Loose but not meaningless: a small MEMS part read over a 115200
+        # line, not a survey instrument.
+        for i in (0, 4, 8):
+            msg.angular_velocity_covariance[i] = 0.01
+            msg.linear_acceleration_covariance[i] = 0.05
+        self.imu_pub.publish(msg)
+
     def _read_telemetry(self):
         """Parse the board's feedback lines for a voltage. Never fatal.
 
@@ -114,6 +190,7 @@ class WaveRoverBridge(Node):
                 continue                      # not every line is JSON
             if not isinstance(obj, dict):
                 continue
+            self._publish_imu(obj)
             for key in self.VOLTAGE_KEYS:
                 if key not in obj:
                     continue
@@ -122,7 +199,10 @@ class WaveRoverBridge(Node):
                 except (TypeError, ValueError):
                     continue
                 if self.V_MIN <= volts <= self.V_MAX:
-                    self._write_telemetry(volts)
+                    now = time.time()
+                    if now - self.last_file_write >= self.FILE_PERIOD_S:
+                        self.last_file_write = now
+                        self._write_telemetry(volts)
                 break
 
     def _write_telemetry(self, volts):

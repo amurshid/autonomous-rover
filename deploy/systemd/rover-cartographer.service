@@ -2,8 +2,13 @@
 Description=Cartographer pure localization against house.pbstream
 # Ordering only -- systemd cannot know when the lidar is producing scans.
 # Cartographer tolerates a late /scan, so this is safe here.
-After=rover-lidar.service
-Requires=rover-lidar.service
+# The bridge is a hard dependency now, not just the lidar: with
+# use_imu_data on, Cartographer blocks waiting for /imu/data before it will
+# process a scan, and the bridge is what publishes it. No bridge, no
+# localisation at all -- which is worse than the drift the IMU was added to
+# cure, so make the ordering explicit rather than hoping.
+After=rover-lidar.service rover-bridge.service
+Requires=rover-lidar.service rover-bridge.service
 
 # WantedBy only starts; PartOf is what makes "systemctl stop
 # rover.target" stop this too.
