@@ -7,7 +7,7 @@ Requires=rover-lidar.service
 
 # WantedBy only starts; PartOf is what makes "systemctl stop
 # rover.target" stop this too.
-PartOf=rover.target
+PartOf=rover-common.target
 
 [Service]
 Type=simple
@@ -20,4 +20,4 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=rover.target
+WantedBy=rover-common.target

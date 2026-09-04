@@ -35,26 +35,98 @@ import signal
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 import rclpy
+import yaml
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import OccupancyGrid
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import (QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile,
-                       QoSReliabilityPolicy)
 
 STATE_PATH = os.environ.get("ROVER_LAST_POSE",
                             "/var/lib/rover/last_pose.json")
 SAMPLE_PERIOD_S = 30.0
 SAMPLE_TIMEOUT_S = 3.0
 FREE_MAX = 20          # occupancy 0-100; anything above this is not open floor
+MAP_YAML = os.environ.get("ROVER_MAP_YAML", "/home/amurshid/house_map.yaml")
 
-# map_server latches /map, so a late subscriber still gets it.
-MAP_QOS = QoSProfile(
-    depth=1, history=QoSHistoryPolicy.KEEP_LAST,
-    reliability=QoSReliabilityPolicy.RELIABLE,
-    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+
+def _read_pgm(path):
+    """(width, height, maxval, pixels) from a binary P5 PGM.
+
+    Written out rather than pulled from a library because the only dependency
+    that would do it is not on the Pi, and the format is four header tokens
+    and a block of bytes.
+    """
+    data = Path(path).read_bytes()
+    tokens, i = [], 0
+    while len(tokens) < 4:
+        while i < len(data) and data[i:i + 1].isspace():
+            i += 1
+        if data[i:i + 1] == b"#":                    # comments run to the EOL
+            while i < len(data) and data[i] != 0x0A:
+                i += 1
+            continue
+        j = i
+        while j < len(data) and not data[j:j + 1].isspace():
+            j += 1
+        tokens.append(data[i:j])
+        i = j
+    if tokens[0] != b"P5":
+        raise ValueError(f"{path}: not a binary PGM ({tokens[0]!r})")
+    w, h, maxval = int(tokens[1]), int(tokens[2]), int(tokens[3])
+    i += 1                       # exactly one whitespace byte after maxval
+    px = data[i:i + w * h]
+    if len(px) != w * h:
+        raise ValueError(f"{path}: wanted {w * h} pixels, got {len(px)}")
+    return w, h, maxval, px
+
+
+class MapGrid:
+    """The occupancy map, read off disk instead of off /map.
+
+    /map belongs to map_server, and map_server is part of Nav2 -- which does
+    not run in remote control. Subscribing would tie this node to Nav2, and a
+    Requires= on Nav2 would start the planner in the one mode whose whole
+    point is that a human is driving. Reading the file map_server reads keeps
+    this node working in both modes and dependent on neither.
+
+    It also removes a race that was visible in the logs: /map is latched, but
+    it still arrives after the subscription is made, so the first sample after
+    boot always found no map and threw a good pose away.
+
+    Thresholds follow nav2_map_server: shade above occupied_thresh is a wall,
+    below free_thresh is floor, between is unknown.
+    """
+
+    def __init__(self, path):
+        with open(path) as f:
+            m = yaml.safe_load(f)
+        image = Path(m["image"])
+        if not image.is_absolute():
+            image = Path(path).parent / image      # yaml-relative, as ROS does
+        self.res = float(m["resolution"])
+        self.ox, self.oy = float(m["origin"][0]), float(m["origin"][1])
+        self.negate = int(m.get("negate", 0))
+        self.occ_th = float(m.get("occupied_thresh", 0.65))
+        self.free_th = float(m.get("free_thresh", 0.196))
+        self.w, self.h, self.maxval, self.px = _read_pgm(image)
+
+    def at(self, x, y):
+        """Occupancy under a map-frame point: 0 free, 100 wall, -1 unknown.
+        None when the point is off the grid entirely."""
+        col = int(math.floor((x - self.ox) / self.res))
+        row = int(math.floor((y - self.oy) / self.res))
+        if not (0 <= col < self.w and 0 <= row < self.h):
+            return None
+        # PGM row 0 is the top of the image, which is the highest y.
+        v = self.px[(self.h - 1 - row) * self.w + col]
+        shade = v / self.maxval if self.negate else (self.maxval - v) / self.maxval
+        if shade > self.occ_th:
+            return 100
+        if shade < self.free_th:
+            return 0
+        return -1
 
 
 class PoseMemory(Node):
@@ -64,13 +136,18 @@ class PoseMemory(Node):
         self.latest = None
         self.saved = 0
         self.rejected = 0
-        self.create_subscription(OccupancyGrid, "/map", self._on_map, MAP_QOS)
+        try:
+            self.grid = MapGrid(MAP_YAML)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            # Fail closed. Without the map nothing can be checked, and saving
+            # unchecked poses is the failure this node exists to avoid -- so
+            # it saves nothing and says so loudly rather than degrading
+            # quietly into the thing it was built to prevent.
+            self.get_logger().error(
+                f"no map from {MAP_YAML} ({e}) -- nothing will be saved")
         self.get_logger().info(
             f"remembering the pose to {STATE_PATH} every "
             f"{SAMPLE_PERIOD_S:.0f}s, when it stands on free space")
-
-    def _on_map(self, msg):
-        self.grid = msg          # arrives once, kept for the life of the node
 
     def _on_pose(self, msg):
         self.latest = msg
@@ -79,16 +156,8 @@ class PoseMemory(Node):
 
     def cell(self, x, y):
         """Occupancy under a point: -1 unknown, 0 free, 100 wall. None if the
-        map has not arrived or the point is off the grid."""
-        g = self.grid
-        if g is None:
-            return None
-        res = g.info.resolution
-        col = int((x - g.info.origin.position.x) / res)
-        row = int((y - g.info.origin.position.y) / res)
-        if not (0 <= col < g.info.width and 0 <= row < g.info.height):
-            return None
-        return g.data[row * g.info.width + col]
+        map failed to load or the point is off the grid."""
+        return None if self.grid is None else self.grid.at(x, y)
 
     # --------------------------------------------------------------- sample
 
@@ -118,7 +187,7 @@ class PoseMemory(Node):
             # worth waking up believing.
             self.rejected += 1
             if self.rejected in (1, 10, 100):
-                where = "no map yet" if self.grid is None else f"cell {occ}"
+                where = "no map" if self.grid is None else f"cell {occ}"
                 self.get_logger().warn(
                     f"not saving ({x:.2f}, {y:.2f}): {where}")
             return

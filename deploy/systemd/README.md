@@ -221,6 +221,31 @@ If the rover is carried somewhere while it is off, the memory is wrong and
 only you know it. Override with `seed_pose.py --room kitchen` or
 `--pose x y yaw`.
 
+### Why Cartographer runs in both modes
+
+The lidar, Cartographer, the `/initialpose` bridge, the seed and the pose
+memory sit in `rover-common.target`, not `rover.target`, so switching to
+remote control leaves them running.
+
+Without that there is a hole nothing else closes. Driving in remote control
+moves the rover while Cartographer is down, so the saved pose keeps pointing
+at wherever autonomous mode left off -- a memory minutes old and metres wrong,
+which the age limit cannot catch and the free-floor check cannot see. Keeping
+Cartographer up means a teleop drive *updates* the memory instead of
+invalidating it, and switching back to autonomous needs no seed and no
+re-localisation at all, because the pose was never lost.
+
+Two consequences. Remote control now carries Cartographer's ~53% and the
+lidar's ~6% on top of the camera, so watch the load there. And mode switching
+no longer restarts Cartographer as a side effect -- if it ever drifts, that
+implicit reset is gone and `sudo systemctl restart rover-cartographer` is the
+explicit one (the seed, Nav2 and the pose memory follow it via `PartOf=`).
+
+The pose memory reads the occupancy map from `house_map.yaml` on disk rather
+than subscribing to `/map`, because `map_server` is part of Nav2 and Nav2 must
+not run during remote control. A `Requires=` on Nav2 would have started the
+planner in the one mode whose whole point is that a human is driving.
+
 ## What systemd can and cannot guarantee
 
 `After=` orders **starts**, not readiness. It cannot know when the lidar is

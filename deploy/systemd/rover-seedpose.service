@@ -14,7 +14,7 @@ Before=rover-nav2.service
 # stop this too. A Cartographer restart also brings this down and back:
 # Cartographer returns on a default pose, and the seed has to be re-asserted
 # or everything downstream works from the origin again.
-PartOf=rover.target rover-cartographer.service
+PartOf=rover-common.target rover-cartographer.service
 
 [Service]
 # oneshot: it publishes one pose and exits. RemainAfterExit lets Nav2's
@@ -40,4 +40,4 @@ SuccessExitStatus=3
 TimeoutStartSec=90
 
 [Install]
-WantedBy=rover.target
+WantedBy=rover-common.target

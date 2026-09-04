@@ -1,13 +1,16 @@
 [Unit]
 Description=Remember where the rover was, for the next start
-# Needs /map to tell free floor from unknown space, and map_server is Nav2's.
-After=rover-nav2.service
-Requires=rover-nav2.service
+# Cartographer is the pose source, and it now runs in both modes, so this
+# does too -- a teleop drive updates the memory instead of invalidating it.
+# Deliberately NOT Nav2: map_server lives inside Nav2, so a Requires= on it
+# would start the planner during remote control, which is the one thing the
+# Conflicts= pair exists to prevent. The map is read off disk instead.
+After=rover-cartographer.service
+Requires=rover-cartographer.service
 
-# WantedBy only starts; PartOf is what makes "systemctl stop rover.target"
-# stop this too -- and stopping it is when the last pose gets written, so the
-# propagation matters more here than elsewhere.
-PartOf=rover.target
+# WantedBy only starts; PartOf is what propagates a stop. Stopping is when the
+# final pose gets written, so this matters more here than elsewhere.
+PartOf=rover-common.target rover-cartographer.service
 
 [Service]
 Type=simple
@@ -32,4 +35,4 @@ Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=rover.target
+WantedBy=rover-common.target
