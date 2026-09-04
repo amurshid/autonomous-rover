@@ -14,6 +14,11 @@ bt_navigator:
     #
     # Costs nothing when a server answers promptly, which is nearly always.
     default_server_timeout: 200
+    # Copied from the installed tree so BackUp can be given a usable speed.
+    # Nav2's default is 0.05 m/s, which lands under the bridge's
+    # straight_deadband: the motors pulse instead of turning and every backup
+    # recovery timed out after ten seconds. See deploy/systemd/README.md.
+    default_nav_to_pose_bt_xml: "/home/amurshid/nav_to_pose_bt.xml"
     transform_tolerance: 0.5
 
 controller_server:
@@ -81,7 +86,14 @@ local_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /scan
+          # /scan_fixed, not /scan. The LD19's own stamps go backwards --
+          # that is why scan_timestamp_relay exists -- and Cartographer has
+          # always consumed the corrected topic. Nav2 was still marking
+          # obstacles with the raw ones, so the two halves of the stack
+          # disagreed about when each scan happened, by as much as 0.15s.
+          # It also puts a second and third subscriber on the topic the relay
+          # is reading, which changes the driver's delivery timing to it.
+          topic: /scan_fixed
           sensor_frame: base_laser
           data_type: "LaserScan"
           clearing: True
@@ -118,7 +130,14 @@ global_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /scan
+          # /scan_fixed, not /scan. The LD19's own stamps go backwards --
+          # that is why scan_timestamp_relay exists -- and Cartographer has
+          # always consumed the corrected topic. Nav2 was still marking
+          # obstacles with the raw ones, so the two halves of the stack
+          # disagreed about when each scan happened, by as much as 0.15s.
+          # It also puts a second and third subscriber on the topic the relay
+          # is reading, which changes the driver's delivery timing to it.
+          topic: /scan_fixed
           sensor_frame: base_laser
           data_type: "LaserScan"
           clearing: True
