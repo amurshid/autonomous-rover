@@ -33,7 +33,24 @@ class WaveRoverBridge(Node):
         # tick is 20 Hz, the most this board can give without changing the
         # tick rate itself.
         self.declare_parameter('telemetry_period', 0.05)
-        self.declare_parameter('imu_frame', 'base_link')
+        # Must be Cartographer's tracking_frame, which wave_rover.lua sets to
+        # base_laser. Cartographer refuses anything else outright:
+        #
+        #   Check failed: sensor_to_tracking->translation().norm() < 1e-5
+        #   The IMU frame must be colocated with the tracking frame.
+        #
+        # It will not compensate a lever arm when rotating acceleration into
+        # the tracking frame, so it makes you declare the sensor colocated
+        # rather than silently accepting an offset.
+        #
+        # Declaring it is honest enough for what Cartographer 2D uses the IMU
+        # for. Angular velocity is identical at every point of a rigid body,
+        # so the gyro -- which is what drives yaw -- reads the same wherever
+        # the board is bolted. Only linear acceleration gains a lever-arm
+        # term, and only while turning: 0.5 rad/s with 10cm of offset is
+        # 0.025 m/s^2 against 9.8 of gravity, a quarter of a percent on the
+        # gravity direction.
+        self.declare_parameter('imu_frame', 'base_laser')
 
         g = self.get_parameter
         port = g('serial_port').value
