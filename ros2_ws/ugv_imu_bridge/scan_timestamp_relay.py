@@ -37,8 +37,24 @@ flight. It got worse under load, because more contention meant more jitter
 meant worse stamps.
 
 So the stamp advances by at least one scan span every time, and only tracks
-the host clock when the host clock is further ahead than that. Overlap
-becomes impossible by construction rather than by luck.
+the host clock when the host clock is further ahead than that.
+
+Bounded, though
+---------------
+Spacing alone ratchets. Under a burst -- Nav2 launching five nodes, say --
+callbacks bunch up, each scan still advances the stamp by a full span, and
+wall clock barely moves. The series ends up ahead of real time and stays
+there, because max() only goes one way. Measured: tf_age stepped from 0.01
+to -0.15 the instant Nav2 started, stayed pinned, and Cartographer pose left
+the map within seconds. Restarting the relay cleared it, which is the tell --
+the state was in this node, not in Cartographer.
+
+So the stamp is also never allowed past the host clock. When spacing and that
+ceiling disagree -- only after a burst -- the ceiling wins, one pair of scans
+overlaps slightly, and the series is back on wall clock. A few dropped points
+once is a much better trade than an unbounded lead: partial drops of one or
+two points were always harmless, and this is what stops them accumulating
+into a pose that runs away.
 """
 
 import rclpy
@@ -47,7 +63,6 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
 DEFAULT_PERIOD_NS = 100_000_000      # 10 Hz, if the message does not say
-RESYNC_NS = 2_000_000_000            # a gap this large is lost scans, not jitter
 
 
 class ScanTimestampRelay(Node):
@@ -61,6 +76,7 @@ class ScanTimestampRelay(Node):
 
         self._last_stamp_ns = None
         self._crowded = 0            # scans that arrived closer than one span
+        self._reeled_in = 0          # times the ceiling pulled the lead back
 
         # Sensor-data QoS (best-effort) on both ends: the sub accepts the
         # driver's stream regardless of its reliability, and best-effort
@@ -102,12 +118,19 @@ class ScanTimestampRelay(Node):
                 # letting this node's scheduling squeeze two scans together.
                 stamp_ns = earliest
                 self._crowded += 1
-            elif arrival_ns - earliest > RESYNC_NS:
-                # Scans were genuinely lost, or the clock stepped. Re-anchor
-                # rather than paying the gap back one span at a time.
-                stamp_ns = arrival_ns
             else:
+                # Includes the genuinely-lost-scans case: re-anchor rather
+                # than paying a real gap back one span at a time.
                 stamp_ns = arrival_ns
+
+            # Never past the host clock. arrival_ns is already now - span, so
+            # this ceiling is 'now'. Only bites after a burst has pushed the
+            # spacing ahead of real time, and giving way here is what keeps
+            # the lead from accumulating.
+            ceiling_ns = arrival_ns + span_ns
+            if stamp_ns > ceiling_ns:
+                stamp_ns = ceiling_ns
+                self._reeled_in += 1
 
         self._last_stamp_ns = stamp_ns
         msg.header.stamp.sec = stamp_ns // 1_000_000_000
@@ -120,11 +143,12 @@ class ScanTimestampRelay(Node):
         A steady count means the Pi is jittery enough that receipt time was
         never a safe stamp -- which is the whole reason this spacing exists.
         """
-        if self._crowded:
+        if self._crowded or self._reeled_in:
             self.get_logger().info(
-                f'{self._crowded} scans in the last minute arrived closer '
-                f'than one scan span; spaced them instead')
-            self._crowded = 0
+                f'last minute: {self._crowded} scans arrived closer than one '
+                f'span and were spaced, {self._reeled_in} pulled back to the '
+                f'host clock')
+            self._crowded = self._reeled_in = 0
 
 
 def main(args=None):
