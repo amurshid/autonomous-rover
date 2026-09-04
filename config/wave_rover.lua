@@ -1,11 +1,14 @@
 -- Cartographer configuration for Waveshare WAVE ROVER
 -- 2D SLAM (LD19 on /scan) WITH IMU fusion.
 --
--- IMU now arrives over direct GPIO UART (~55 Hz, sub-ms jitter) via
--- ugv_imu_bridge on /imu/data, timestamped on receipt with low, constant
--- latency. This is clean enough to fuse, unlike the old 10 Hz HTTP path.
--- With no wheel odometry, the IMU gives Cartographer gravity alignment and
--- reliable yaw-rate between scans.
+-- The IMU arrives on /imu/data from wave_rover_bridge.py, read off the same
+-- serial line as the motor commands and republished at 20 Hz. With no wheel
+-- odometry it is Cartographer's only source of motion between scans:
+-- gravity for alignment, and yaw rate for rotation.
+--
+-- This file is the base for mapping AND localization --
+-- wave_rover_localization.lua begins with include "wave_rover.lua", so
+-- everything here is live in both unless that file overrides it afterwards.
 
 include "map_builder.lua"
 include "trajectory_builder.lua"
@@ -14,7 +17,7 @@ options = {
   map_builder = MAP_BUILDER,
   trajectory_builder = TRAJECTORY_BUILDER,
   map_frame = "map",
-  tracking_frame = "base_laser",            -- track at the IMU when fusing IMU
+  tracking_frame = "base_laser",         -- track at the IMU when fusing IMU
   published_frame = "base_link",         -- publish the robot-center pose for PPO
   odom_frame = "odom",
   provide_odom_frame = true,
@@ -40,14 +43,20 @@ options = {
 
 MAP_BUILDER.use_trajectory_builder_2d = true
 
-TRAJECTORY_BUILDER_2D.use_imu_data = false    -- <— fuse the IMU
+-- This read `false` while the comment above it said "fuse the IMU", and the
+-- scan matcher below was narrowed on the assumption the IMU was supplying a
+-- rotation prior. So the matcher was searching a tight window around a prior
+-- that did not exist -- with nothing to fall back on, it locked onto whatever
+-- was nearest in a symmetric room. That is the state localization has been
+-- running in, and no amount of fixing the scan pipeline could cure it.
+TRAJECTORY_BUILDER_2D.use_imu_data = true
 TRAJECTORY_BUILDER_2D.min_range = 0.1
 TRAJECTORY_BUILDER_2D.max_range = 8.0
 TRAJECTORY_BUILDER_2D.missing_data_ray_length = 5.0
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
 TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.5)
--- The IMU now supplies the rotation prior, so the correlative matcher only
--- needs a NARROW search around it. Was 40 deg / 0.2 m — a legacy fix for
+-- The IMU supplies the rotation prior, so the correlative matcher only needs
+-- a NARROW search around it. Was 40 deg / 0.2 m -- a legacy fix for
 -- turn-warping that the scan-timestamp relay already solved. The wide window
 -- let the matcher wander off the IMU prediction in open/symmetric rooms,
 -- snapping the pose to wrong angles (rotating/overlapping/shaking map).
@@ -60,4 +69,3 @@ POSE_GRAPH.constraint_builder.min_score = 0.7
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.75
 
 return options
-

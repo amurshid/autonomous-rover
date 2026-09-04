@@ -22,7 +22,21 @@
 -- rover-cartographer.service requires rover-bridge.service.
 
 include "wave_rover.lua"
+
+-- Stated again here even though the base config now sets it, so that a
+-- stale wave_rover.lua cannot silently take the IMU away. Without it the
+-- scan matcher searches a narrow window around a rotation prior that does
+-- not exist -- see the note in the base config.
 TRAJECTORY_BUILDER_2D.use_imu_data = true
+
+-- Parked, the rover should barely add to its trajectory. The base config
+-- creates a node at half a degree of rotation, which is right for mapping --
+-- you want dense nodes while building -- and wrong here: orientation noise
+-- alone pushed node ids past 246 in three minutes on a rover that had not
+-- moved. Every one of those is another submap contribution and another
+-- candidate for a bad constraint, and the bad constraints are what moved the
+-- pose across the house. Two degrees still tracks a real turn.
+TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(2.0)
 
 -- Localize against the loaded map instead of extending it.
 -- Keeps only the few most recent submaps so memory stays bounded.
@@ -33,32 +47,10 @@ TRAJECTORY_BUILDER.pure_localization_trimmer = {
 -- Optimize more often than mapping (was 35) for responsive pose updates.
 POSE_GRAPH.optimize_every_n_nodes = 90
 
--- Do not accept a match from somewhere the rover cannot be.
---
--- Cartographer builds occasional near-empty nodes -- 1, 9, 16 points where a
--- healthy scan gives 200 -- and a handful of points matches almost anywhere.
--- Measured over an evening, with the rover parked and untouched:
---
---   honest constraints    0.00 - 0.60 m away,  200-215 points
---   every harmful one     4.48, 4.88, 8.69 m,  1, 9, 16 points
---
--- Score does not separate them: the bad ones came in at 77-90%, inside the
--- range of the good ones. Distance separates them completely, with a
--- factor-of-seven gap and nothing in it. Each of those long constraints
--- dragged the whole trajectory across the house and left it there.
---
--- 2.0 sits in that gap. The seed puts us within a metre and real corrections
--- are sub-metre, so this cannot block an honest match.
-POSE_GRAPH.constraint_builder.max_constraint_distance = 2.0
-
--- Whole-map relocalization is what lets the pose teleport rather than drift.
--- It is also what put the rover at (-21.88, -5.73) and (-311, 88) on an
--- unseeded start. seed_pose.py asserts the parking spot instead, and that
--- has been reliable.
---
--- The cost is real: the rover can no longer find itself if it is genuinely
--- lost. Move it while it is off and you re-seed by hand. That capability has
--- never once rescued this rover, and has repeatedly ruined it.
+-- Whole-map relocalization is what lets the pose teleport rather than drift,
+-- and it produced (-21.88, -5.73) and (-311, 88) on unseeded starts. The
+-- seed asserts the parking spot instead. The cost: the rover can no longer
+-- find itself if genuinely lost -- move it while it is off and re-seed.
 POSE_GRAPH.global_sampling_ratio = 0.0
 
 MAP_BUILDER.num_background_threads = 2
