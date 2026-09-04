@@ -194,6 +194,33 @@ goal sent inside that first minute is planned from a pose Cartographer has not
 settled on yet. Give it a minute after the mode page goes green, or check
 `/tracked_pose` has stopped moving before sending the rover anywhere.
 
+## Starting where it stopped
+
+`rover-posememory` samples `/tracked_pose` every 30 seconds and writes it to
+`/var/lib/rover/last_pose.json`, plus once more on SIGTERM so a clean stop
+records the final position. `seed_pose.py` reads that instead of the work
+room, falling back to the room if the file is missing, unreadable, or older
+than 12 hours.
+
+It samples rather than subscribes. `/tracked_pose` runs at ~192 Hz and a
+resident subscriber costs about 40% of a core here -- measured as the
+difference between `track_pose` on and off in `rover_nav.py` -- so the
+subscription is created, used for one message, and destroyed, every 30
+seconds. Half-minute-stale is fine for a rover that moves at 0.5 m/s and is
+usually parked.
+
+**Only a pose standing on free floor is saved.** Cartographer's estimate has
+been seen to leave the map and sit there confidently, and persisting one of
+those would seed the next boot somewhere the rover has never been -- worse
+than the fixed default, which is at least right when the rover is parked
+properly. That check is necessary and not sufficient: a wrong pose can land
+on free floor, which is why the age limit exists and why the seed says out
+loud which pose it used.
+
+If the rover is carried somewhere while it is off, the memory is wrong and
+only you know it. Override with `seed_pose.py --room kitchen` or
+`--pose x y yaw`.
+
 ## What systemd can and cannot guarantee
 
 `After=` orders **starts**, not readiness. It cannot know when the lidar is
@@ -219,7 +246,8 @@ none appears.
     sudo systemctl daemon-reload
     sudo systemctl enable rover.target
     sudo systemctl enable rover-bridge rover-lidar rover-cartographer \
-         rover-initialpose rover-seedpose rover-nav2 rover-ai
+         rover-initialpose rover-seedpose rover-nav2 rover-ai \
+         rover-posememory
     sudo systemctl enable rover-camera rover-teleop rover-mode
 
 **Use `reenable`, not `enable`, when a unit's `[Install]` section has moved.**

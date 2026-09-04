@@ -5,14 +5,20 @@ Nothing published to /initialpose at boot, so Cartographer started at the map
 origin and found itself by global localization over the whole map: measured at
 167s, a 7.89 m jump. From a pose near the truth it refines in seconds instead.
 
-    python3 seed_pose.py                    # work_room, from rooms.py
-    python3 seed_pose.py --room entrance
+    python3 seed_pose.py                    # where it was last seen
+    python3 seed_pose.py --room work_room   # the marked spot, ignore memory
     python3 seed_pose.py --pose 1.55 7.73 -110
 
-This is only right if the rover is actually parked there. A confident wrong
-seed is worse than none: the same assertion measured 5.66 m wrong on an
-ordinary boot, and Cartographer's scan matcher will happily hold a wrong pose
-that looks locally consistent. Park it on the mark, or pass --pose.
+By default it starts from wherever rover_pose_memory.py last saw the rover
+standing on free floor, falling back to the work room if that memory is
+missing, unreadable, or older than --max-age. So the rover can be left in the
+kitchen and still wake up knowing roughly where it is.
+
+Either way this is only right if the rover has not been moved since. A
+confident wrong seed is worse than none: the marked spot measured 5.66 m
+wrong on an ordinary boot, and Cartographer's scan matcher will happily hold
+a wrong pose that looks locally consistent. If it was carried somewhere while
+off, pass --room or --pose.
 
 Two consequences worth knowing. wait_for_localisation.py watches for the jump
 that global localization makes, and a correctly seeded rover never jumps -- it
@@ -27,6 +33,7 @@ Exit codes: 0 published, 3 nobody subscribed, 4 no such room.
 """
 
 import argparse
+import json
 import math
 import os
 import sys
@@ -40,30 +47,68 @@ from rclpy.node import Node
 sys.path.insert(0, os.path.expanduser("~"))
 from rooms import ROOMS  # noqa: E402
 
-DEFAULT_ROOM = "work_room"
+DEFAULT_ROOM = "work_room"          # the fallback, when memory is no good
 SUBSCRIBER_TIMEOUT = 30.0
+LAST_POSE_PATH = os.environ.get("ROVER_LAST_POSE",
+                                "/var/lib/rover/last_pose.json")
+MAX_AGE_S = 12 * 3600              # older than this and it is a guess
+
+
+def remembered(path, max_age):
+    """(x, y, qz, qw, description) from the saved pose, or None.
+
+    Every reason to distrust it ends the same way -- fall back to the room --
+    so they are all one quiet return rather than a pile of error cases. The
+    only one worth naming out loud is age, since a stale memory means the
+    rover sat somewhere for half a day and the answer may simply be old.
+    """
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        age = time.time() - float(d["t"])
+        x, y = float(d["x"]), float(d["y"])
+        qz, qw = float(d["qz"]), float(d["qw"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if age > max_age:
+        print(f"last known pose is {age / 3600:.1f}h old, older than "
+              f"{max_age / 3600:.0f}h -- using {DEFAULT_ROOM} instead")
+        return None
+    mins = age / 60.0
+    when = f"{age:.0f}s ago" if mins < 1 else f"{mins:.0f} min ago"
+    return x, y, qz, qw, f"where it was last seen ({when})"
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--room', default=DEFAULT_ROOM,
-                    help=f'room to assert (default {DEFAULT_ROOM})')
+    ap.add_argument('--room', help='assert a room instead of the last '
+                                   'known pose')
     ap.add_argument('--pose', nargs=3, type=float, metavar=('X', 'Y', 'YAW_DEG'),
-                    help='explicit pose, overrides --room')
+                    help='explicit pose, overrides everything')
+    ap.add_argument('--max-age', type=float, default=MAX_AGE_S,
+                    help=f'seconds before the saved pose is too old to trust '
+                         f'(default {MAX_AGE_S / 3600:.0f}h)')
     ap.add_argument('--timeout', type=float, default=SUBSCRIBER_TIMEOUT,
                     help='seconds to wait for a subscriber (default 30)')
     args = ap.parse_args()
+
+    memory = None if (args.pose or args.room) else \
+        remembered(LAST_POSE_PATH, args.max_age)
 
     if args.pose:
         x, y, yaw = args.pose
         qz, qw = math.sin(math.radians(yaw) / 2), math.cos(math.radians(yaw) / 2)
         where = f'x={x:.2f} y={y:.2f} yaw={yaw:.0f}deg'
+    elif memory:
+        x, y, qz, qw, when = memory
+        where = f'{when}: x={x:.2f} y={y:.2f}'
     else:
-        if args.room not in ROOMS:
-            print(f'no such room: {args.room}. Known: {", ".join(sorted(ROOMS))}')
+        room = args.room or DEFAULT_ROOM
+        if room not in ROOMS:
+            print(f'no such room: {room}. Known: {", ".join(sorted(ROOMS))}')
             return 4
-        x, y, qz, qw = ROOMS[args.room]
-        where = f'{args.room} (x={x:.2f} y={y:.2f})'
+        x, y, qz, qw = ROOMS[room]
+        where = f'{room} (x={x:.2f} y={y:.2f})'
 
     rclpy.init()
     node = Node('seed_pose')

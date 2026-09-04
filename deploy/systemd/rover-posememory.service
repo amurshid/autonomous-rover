@@ -1,0 +1,35 @@
+[Unit]
+Description=Remember where the rover was, for the next start
+# Needs /map to tell free floor from unknown space, and map_server is Nav2's.
+After=rover-nav2.service
+Requires=rover-nav2.service
+
+# WantedBy only starts; PartOf is what makes "systemctl stop rover.target"
+# stop this too -- and stopping it is when the last pose gets written, so the
+# propagation matters more here than elsewhere.
+PartOf=rover.target
+
+[Service]
+Type=simple
+User=amurshid
+WorkingDirectory=/home/amurshid
+# /var/lib/rover, owned by this unit's user and kept across reboots. Not
+# RuntimeDirectory: the whole point is surviving a power cut.
+StateDirectory=rover
+StateDirectoryMode=0755
+# print() to a pipe is block-buffered, so under systemd the log
+# arrives in 4KB chunks or not until exit. These scripts say what
+# they are doing through print(); unbuffered is what makes
+# journalctl -f usable.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+    source /home/amurshid/ros2_ws/install/setup.bash && \
+    exec python3 /home/amurshid/rover_pose_memory.py'
+# SIGTERM triggers one last sample before exit, so a clean stop records where
+# it actually finished. Give that room rather than killing mid-write.
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=rover.target

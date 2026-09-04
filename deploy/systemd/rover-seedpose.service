@@ -28,9 +28,12 @@ WorkingDirectory=/home/amurshid
 # they are doing through print(); unbuffered is what makes
 # journalctl -f usable.
 Environment=PYTHONUNBUFFERED=1
+# No --room: that forces the room and skips the saved pose entirely. Bare,
+# it uses where the rover was last seen and falls back to the work room when
+# there is nothing to use -- same behaviour as before on a first boot.
 ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
     source /home/amurshid/ros2_ws/install/setup.bash && \
-    exec python3 /home/amurshid/seed_pose.py --room work_room'
+    exec python3 /home/amurshid/seed_pose.py'
 # Exit 3 = nobody subscribed to /initialpose. That must not stop the boot:
 # without a seed Cartographer still finds itself, it just takes minutes.
 SuccessExitStatus=3
