@@ -33,6 +33,34 @@ TRAJECTORY_BUILDER.pure_localization_trimmer = {
 -- Optimize more often than mapping (was 35) for responsive pose updates.
 POSE_GRAPH.optimize_every_n_nodes = 90
 
+-- Do not accept a match from somewhere the rover cannot be.
+--
+-- Cartographer builds occasional near-empty nodes -- 1, 9, 16 points where a
+-- healthy scan gives 200 -- and a handful of points matches almost anywhere.
+-- Measured over an evening, with the rover parked and untouched:
+--
+--   honest constraints    0.00 - 0.60 m away,  200-215 points
+--   every harmful one     4.48, 4.88, 8.69 m,  1, 9, 16 points
+--
+-- Score does not separate them: the bad ones came in at 77-90%, inside the
+-- range of the good ones. Distance separates them completely, with a
+-- factor-of-seven gap and nothing in it. Each of those long constraints
+-- dragged the whole trajectory across the house and left it there.
+--
+-- 2.0 sits in that gap. The seed puts us within a metre and real corrections
+-- are sub-metre, so this cannot block an honest match.
+POSE_GRAPH.constraint_builder.max_constraint_distance = 2.0
+
+-- Whole-map relocalization is what lets the pose teleport rather than drift.
+-- It is also what put the rover at (-21.88, -5.73) and (-311, 88) on an
+-- unseeded start. seed_pose.py asserts the parking spot instead, and that
+-- has been reliable.
+--
+-- The cost is real: the rover can no longer find itself if it is genuinely
+-- lost. Move it while it is off and you re-seed by hand. That capability has
+-- never once rescued this rover, and has repeatedly ruined it.
+POSE_GRAPH.global_sampling_ratio = 0.0
+
 MAP_BUILDER.num_background_threads = 2
 POSE_GRAPH.optimization_problem.ceres_solver_options.num_threads = 2
 return options
