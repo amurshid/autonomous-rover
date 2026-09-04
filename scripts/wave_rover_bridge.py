@@ -29,10 +29,13 @@ class WaveRoverBridge(Node):
         self.declare_parameter('tick_hz', 20.0)
         self.declare_parameter('left_trim', 1.0)
         self.declare_parameter('right_trim', 1.0)
-        # Cartographer wants the IMU faster than the lidar's 10 Hz. Every
-        # tick is 20 Hz, the most this board can give without changing the
-        # tick rate itself.
-        self.declare_parameter('telemetry_period', 0.05)
+        # Once a second: enough for a battery readout, which is all that
+        # consumes this now. It was 20 Hz while Cartographer was fusing the
+        # IMU; with use_imu_data back to false nothing reads /imu/data, and
+        # polling the board twenty times a second for it is serial traffic
+        # and CPU spent on a topic with no subscriber. The Imu message is
+        # still published, dormant, if fusion is ever tried again.
+        self.declare_parameter('telemetry_period', 1.0)
         # Must be Cartographer's tracking_frame, which wave_rover.lua sets to
         # base_laser. Cartographer refuses anything else outright:
         #
