@@ -74,12 +74,29 @@ scan, take no scan. Skipping also sheds the lead on its own: the stamp does
 not advance while wall clock does, so the next scan has room again.
 """
 
+import math
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 
 DEFAULT_PERIOD_NS = 100_000_000      # 10 Hz, if the message does not say
+
+# A scan carrying far fewer returns than usual is worse than no scan at all.
+# Cartographer builds a node from it, and the constraint builder then matches
+# that handful of points against the map at 90%, metres from where the rover
+# is. Observed on a stationary rover:
+#
+#   Node (2, 13) with 1 points on submap (2, 1)
+#   differs by translation 4.48 rotation 0.117 with score 90.0%
+#
+# That constraint moved the trajectory 7m, and the node went on offering
+# false matches for minutes afterwards. Healthy scans here carry ~200 returns
+# and agree to within 0.01m.
+SPARSE_RATIO = 0.4       # of the running average, below which a scan is junk
+BASELINE_ALPHA = 0.05    # how fast that average tracks; slow, so a run of bad
+                         # scans cannot teach it to accept them
 
 
 class ScanTimestampRelay(Node):
@@ -94,6 +111,8 @@ class ScanTimestampRelay(Node):
         self._last_stamp_ns = None
         self._crowded = 0            # scans that arrived closer than one span
         self._skipped = 0            # scans dropped rather than overlapped
+        self._sparse = 0             # scans dropped for too few returns
+        self._baseline = None        # running average of valid returns
 
         # Sensor-data QoS (best-effort) on both ends: the sub accepts the
         # driver's stream regardless of its reliability, and best-effort
@@ -120,7 +139,31 @@ class ScanTimestampRelay(Node):
             span = max(span, int(msg.scan_time * 1e9))
         return span or DEFAULT_PERIOD_NS
 
+    def _too_sparse(self, msg: LaserScan):
+        """True if this scan carries far fewer returns than usual.
+
+        The threshold rides a slow average of what this lidar normally
+        produces rather than a fixed count, so it adapts to a room with
+        little in range without being told. Dropped scans do not update the
+        average, or a run of bad ones would teach it to accept them.
+        """
+        valid = 0
+        for r in msg.ranges:
+            if msg.range_min <= r <= msg.range_max and math.isfinite(r):
+                valid += 1
+
+        if self._baseline is None:
+            self._baseline = float(valid)
+            return False                    # nothing to compare against yet
+        if valid < self._baseline * SPARSE_RATIO:
+            self._sparse += 1
+            return True
+        self._baseline += BASELINE_ALPHA * (valid - self._baseline)
+        return False
+
     def relay(self, msg: LaserScan):
+        if self._too_sparse(msg):
+            return
         span_ns = self._span_ns(msg)
         # Host clock at receipt, back-dated by one span so the stamp
         # approximates the first ray (LaserScan convention), not scan end.
@@ -159,12 +202,13 @@ class ScanTimestampRelay(Node):
         A steady count means the Pi is jittery enough that receipt time was
         never a safe stamp -- which is the whole reason this spacing exists.
         """
-        if self._crowded or self._skipped:
+        if self._crowded or self._skipped or self._sparse:
+            base = f'{self._baseline:.0f}' if self._baseline else '?'
             self.get_logger().info(
-                f'last minute: {self._crowded} scans arrived closer than one '
-                f'span and were spaced, {self._skipped} dropped rather than '
-                f'published overlapping')
-            self._crowded = self._skipped = 0
+                f'last minute: {self._crowded} spaced, {self._skipped} dropped '
+                f'rather than overlapped, {self._sparse} dropped as sparse '
+                f'(usual return count {base})')
+            self._crowded = self._skipped = self._sparse = 0
 
 
 def main(args=None):
