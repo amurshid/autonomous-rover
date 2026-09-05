@@ -5,8 +5,13 @@ Description=Remember where the rover was, for the next start
 # Deliberately NOT Nav2: map_server lives inside Nav2, so a Requires= on it
 # would start the planner during remote control, which is the one thing the
 # Conflicts= pair exists to prevent. The map is read off disk instead.
-After=rover-cartographer.service
-Requires=rover-cartographer.service
+# The seed, not Cartographer directly -- it pulls Cartographer in behind it.
+# Depending on Cartographer alone let this start beside an unseeded one, which
+# publishes the map origin from the moment it boots: recording that overwrote
+# a good memory with (0, 0), and the free-floor check waved it through because
+# the origin happens to sit on open floor.
+After=rover-seedpose.service
+Requires=rover-seedpose.service
 
 # WantedBy only starts; PartOf is what propagates a stop. Stopping is when the
 # final pose gets written, so this matters more here than elsewhere.
@@ -20,6 +25,13 @@ WorkingDirectory=/home/amurshid
 # RuntimeDirectory: the whole point is surviving a power cut.
 StateDirectory=rover
 StateDirectoryMode=0755
+# /run/rover is normally the bridge's, and without it the status file cannot
+# be written -- which is how it failed the first time, with the bridge down.
+# Preserve=yes so stopping this does not delete the bridge's telemetry.json
+# out from under a bridge that is still running.
+RuntimeDirectory=rover
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 # print() to a pipe is block-buffered, so under systemd the log
 # arrives in 4KB chunks or not until exit. These scripts say what
 # they are doing through print(); unbuffered is what makes
