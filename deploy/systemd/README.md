@@ -221,6 +221,24 @@ If the rover is carried somewhere while it is off, the memory is wrong and
 only you know it. Override with `seed_pose.py --room kitchen` or
 `--pose x y yaw`.
 
+### Forgetting a pose
+
+If the rover is moved by hand while it is off, nothing can detect it -- the
+memory is fresh, sits on free floor, and is wrong. The mode page's "forget
+saved pose" button deletes `last_pose.json` and writes `hold` beside it.
+
+The hold is what makes the button work at all. Deleting the file alone
+achieves nothing: the next sample, up to 30 seconds later, writes the same
+wrong pose back. So `rover_pose_memory` checks for `hold` *before* sampling,
+which also covers the final save on SIGTERM -- otherwise pressing the button
+and powering off would record the very pose the button discarded.
+
+It clears the marker at startup, so the power cycle the button asks for
+resumes recording normally, with the seed having already asserted the work
+room. Any restart clears it, not only the intended one; a Cartographer crash
+mid-carry would resume recording early. The button's contract is "then park it
+and power cycle", and it says so.
+
 ### Why Cartographer runs in both modes
 
 The lidar, Cartographer, the `/initialpose` bridge, the seed and the pose

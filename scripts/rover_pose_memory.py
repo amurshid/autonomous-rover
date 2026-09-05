@@ -49,6 +49,11 @@ SAMPLE_PERIOD_S = 30.0
 SAMPLE_TIMEOUT_S = 3.0
 FREE_MAX = 20          # occupancy 0-100; anything above this is not open floor
 MAP_YAML = os.environ.get("ROVER_MAP_YAML", "/home/amurshid/house_map.yaml")
+# Written by the mode page's "forget saved pose" button, beside the memory it
+# clears. Without it the button does nothing: the next sample, 30s later,
+# writes the same wrong pose straight back.
+HOLD_PATH = os.environ.get("ROVER_POSE_HOLD",
+                           os.path.join(os.path.dirname(STATE_PATH), "hold"))
 
 
 def _read_pgm(path):
@@ -136,6 +141,17 @@ class PoseMemory(Node):
         self.latest = None
         self.saved = 0
         self.rejected = 0
+        self.held = False
+        # A hold from before this start has done its job. It means somebody
+        # moved the rover by hand and pressed the button; the power cycle it
+        # asks for is this start, and the seed has already run. Leaving it set
+        # would mean never recording anything again.
+        if os.path.exists(HOLD_PATH):
+            try:
+                os.remove(HOLD_PATH)
+                self.get_logger().info(f"cleared the hold at {HOLD_PATH}")
+            except OSError as e:
+                self.get_logger().warn(f"could not clear {HOLD_PATH}: {e}")
         try:
             self.grid = MapGrid(MAP_YAML)
         except (OSError, ValueError, KeyError, TypeError) as e:
@@ -176,6 +192,17 @@ class PoseMemory(Node):
 
     def remember(self):
         """Sample, check it is somewhere real, and write it down."""
+        if os.path.exists(HOLD_PATH):
+            # Before sampling, not after: a held node should not even take a
+            # pose. This is also what covers the final save on SIGTERM, which
+            # comes through here -- otherwise pressing the button and powering
+            # off would write back the very pose the button discarded.
+            if not self.held:
+                self.get_logger().info(
+                    f"holding: {HOLD_PATH} exists, recording nothing until "
+                    f"this node restarts")
+                self.held = True
+            return
         msg = self.sample()
         if msg is None:
             return
