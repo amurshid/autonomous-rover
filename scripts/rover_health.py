@@ -22,6 +22,14 @@ THERMAL = "/sys/class/thermal/thermal_zone0/temp"
 TELEMETRY = os.environ.get("ROVER_TELEMETRY", "/run/rover/telemetry.json")
 STALE_S = 15.0
 
+# rover_pose_memory writes this every 30s: whether Cartographer's pose stands
+# on the map at all. Read the same way as the battery -- a missing or stale
+# file is "unknown", never an error, because both pages have to keep working
+# when nothing else is running.
+POSE_STATUS = os.environ.get("ROVER_POSE_STATUS",
+                             "/run/rover/pose_status.json")
+POSE_STALE_S = 90.0                    # three missed samples
+
 # 3S lithium: 12.6 V charged, 9.9 V effectively flat. Override per pack.
 V_FULL = float(os.environ.get("ROVER_V_FULL", 12.6))
 V_EMPTY = float(os.environ.get("ROVER_V_EMPTY", 9.9))
@@ -59,11 +67,31 @@ def battery():
     return round(volts, 2), max(0, min(100, round(pct)))
 
 
+def localisation():
+    """('on_map' | 'off_map' | 'unknown', occupancy or None).
+
+    off_map means Cartographer's own estimate is in unknown space or inside a
+    wall -- it has lost the map while insisting otherwise, which is the
+    failure that used to show up only as a goal that would not plan.
+    """
+    try:
+        with open(POSE_STATUS) as f:
+            d = json.load(f)
+        if time.time() - float(d["t"]) > POSE_STALE_S:
+            return "unknown", None     # nobody is sampling; say nothing
+        return ("on_map" if d["ok"] else "off_map"), d.get("cell")
+    except (OSError, ValueError, KeyError, TypeError):
+        return "unknown", None
+
+
 def snapshot():
     """Everything the pages show, in one dict."""
     c = temperature()
     volts, pct = battery()
+    loc, cell = localisation()
     return {
+        "localisation": loc,
+        "loc_cell": cell,
         "temp_c": None if c is None else round(c, 1),
         "temp_state": None if c is None else (
             "hot" if c >= TEMP_HOT else "warm" if c >= TEMP_WARN else "ok"),

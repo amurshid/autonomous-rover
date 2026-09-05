@@ -10,7 +10,12 @@
 # rover-ai is the only unit that can be stopped from here, and stopping it is
 # the harmless direction: the rover stops talking. Nothing here can stop the
 # motors, Nav2, or the page itself.
+# Restarting Cartographer is the recovery when its pose leaves the map. It
+# is a restart, never a stop: Nav2 Requires= it, so stopping it would strand
+# the rover blind with no way back from the page, while a restart brings Nav2
+# and the seed back with it.
 amurshid ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block rover.target, \
                               /usr/bin/systemctl start --no-block rover-teleop.target, \
                               /usr/bin/systemctl start --no-block rover-ai.service, \
-                              /usr/bin/systemctl stop --no-block rover-ai.service
+                              /usr/bin/systemctl stop --no-block rover-ai.service, \
+                              /usr/bin/systemctl restart --no-block rover-cartographer.service

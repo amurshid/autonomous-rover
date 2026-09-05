@@ -368,6 +368,15 @@ class Navigator:
 
 NAV = Navigator()
 
+# Phases in which nothing is being driven anywhere. Anything else means a goal
+# is in flight, and the two recovery actions on this page -- forgetting a pose
+# and restarting localisation -- would both pull the ground out from under it.
+NAV_SETTLED = ("idle", "arrived", "cancelled", "failed", "rejected")
+
+
+def nav_busy():
+    return NAV.snapshot()["phase"] not in NAV_SETTLED
+
 
 def pose_held():
     """True while the memory is held, so the page can say so.
@@ -559,10 +568,11 @@ PAGE = """<!doctype html>
   /* Deliberately quiet: rarely needed, and wrong to press casually. */
   #fpwrap { margin:20px 2px 0; display:flex; align-items:center; gap:10px;
             flex-wrap:wrap; }
-  #forget { background:none; border:1px solid var(--edge); color:var(--dim);
-            border-radius:8px; padding:7px 12px; font-size:13px; }
-  #forget:disabled { opacity:.45; }
-  #forget:active { transform:scale(.98); }
+  #forget, #relocal { background:none; border:1px solid var(--edge);
+            color:var(--dim); border-radius:8px; padding:7px 12px;
+            font-size:13px; }
+  #forget:disabled, #relocal:disabled { opacity:.45; }
+  #forget:active, #relocal:active { transform:scale(.98); }
   #fpnote { color:var(--dim); font-size:12px; flex:1 1 100%; }
   #fpnote.held { color:var(--wait); }
   @keyframes rise { from { opacity:0; transform:translateY(4px); } }
@@ -571,7 +581,7 @@ PAGE = """<!doctype html>
 <div class="wrap">
   <h1>Rover</h1>
   <p class="sub">Pick a mode.</p>
-  <div id="health"><span id="batt"></span><span id="temp"></span></div>
+  <div id="health"><span id="batt"></span><span id="temp"></span><span id="loc"></span></div>
   <div id="cards"></div>
 
   <div id="rooms" hidden>
@@ -589,6 +599,7 @@ PAGE = """<!doctype html>
   </div>
 
   <div id="fpwrap">
+    <button id="relocal">Restart localisation</button>
     <button id="forget">Forget saved pose</button>
     <span id="fpnote"></span>
   </div>
@@ -632,6 +643,14 @@ function paintHealth(h) {
   t.textContent = h.temp_c == null ? '' : `${h.temp_c}\u00B0C`;
   t.className = h.temp_state === 'hot' ? 'bad'
               : h.temp_state === 'warm' ? 'warn' : '';
+
+  // Silent when unknown. Nothing samples the pose unless a mode is running,
+  // and an empty pill is honest where "unknown" would read as a fault.
+  const l = document.getElementById('loc');
+  const state = h.localisation;
+  l.textContent = state === 'off_map' ? 'off map'
+                : state === 'on_map'  ? 'on map' : '';
+  l.className = state === 'off_map' ? 'bad' : '';
 }
 
 async function poll() {
@@ -662,6 +681,20 @@ document.getElementById('forget').onclick = async () => {
     if (!j.ok) note.textContent = j.detail;
   } catch (e) { note.textContent = 'no answer from the rover'; }
   poll();            // the held state comes from the server, not from here
+};
+
+document.getElementById('relocal').onclick = async () => {
+  if (!confirm('Restart localisation? Cartographer drops and comes back on ' +
+               'its last good pose. About ten seconds, and the rover must be ' +
+               'stopped.')) return;
+  const note = document.getElementById('fpnote');
+  note.className = ''; note.textContent = 'restarting localisation...';
+  try {
+    const j = await (await fetch('/api/localisation/restart', {method:'POST'})).json();
+    note.textContent = j.ok ? 'Localisation restarting. Watch the pill above.'
+                            : j.detail;
+  } catch (e) { note.textContent = 'no answer from the rover'; }
+  poll();
 };
 
 function paintPose(st) {
@@ -916,6 +949,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._ai(self.path.endswith("/on"))
         if self.path == "/api/pose/forget":
             return self._forget_pose()
+        if self.path == "/api/localisation/restart":
+            return self._restart_localisation()
         self._send(404, "not found", "text/plain")
 
     def _ai(self, on):
@@ -950,8 +985,7 @@ class Handler(BaseHTTPRequestHandler):
         holding until it restarts, which is why the confirm text asks for a
         power cycle rather than implying the rover now knows where it is.
         """
-        if NAV.snapshot()["phase"] not in ("idle", "arrived", "cancelled",
-                                           "failed", "rejected"):
+        if nav_busy():
             return self._reply(False, "stop the rover first")
         try:
             with open(POSE_HOLD, "w"):
@@ -965,6 +999,28 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             return self._reply(False, f"held, but {POSE_PATH} remains: {e}")
         return self._reply(True, "forgotten")
+
+    def _restart_localisation(self):
+        """Bring Cartographer back when its pose has left the map.
+
+        Restart, never stop. Nav2 Requires= Cartographer, so stopping it would
+        take Nav2 down and leave a blind rover with no way back from this page
+        -- and mode switching no longer restarts anything, now that both modes
+        share it.
+
+        It recovers to somewhere real because rover_pose_memory refuses to
+        save a pose that is not on free floor: the memory still holds the last
+        pose that was right, and the seed re-runs from it through PartOf=. That
+        is only true if the rover has not moved since it got lost; if it drove
+        while diverged, park it and forget the pose instead.
+        """
+        if nav_busy():
+            return self._reply(False, "stop the rover first")
+        code, out, err = systemctl("restart", "--no-block",
+                                   "rover-cartographer.service", root=True)
+        _cache.update(at=0.0, states=None)
+        self._reply(code == 0, err or out or "restarting",
+                    code=200 if code == 0 else 500)
 
     def _switch(self, key):
         if key not in MODES:

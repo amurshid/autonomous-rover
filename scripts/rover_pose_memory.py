@@ -54,6 +54,13 @@ MAP_YAML = os.environ.get("ROVER_MAP_YAML", "/home/amurshid/house_map.yaml")
 # writes the same wrong pose straight back.
 HOLD_PATH = os.environ.get("ROVER_POSE_HOLD",
                            os.path.join(os.path.dirname(STATE_PATH), "hold"))
+# The verdict on every sample, good or bad, for the pages to show. /run is
+# tmpfs, so this costs no card writes -- the same place the bridge puts its
+# telemetry. Deciding whether to save already computes this; throwing the
+# answer away whenever it was "no" is what left a diverged Cartographer
+# invisible until a goal failed.
+STATUS_PATH = os.environ.get("ROVER_POSE_STATUS",
+                             "/run/rover/pose_status.json")
 
 
 def _read_pgm(path):
@@ -142,6 +149,7 @@ class PoseMemory(Node):
         self.saved = 0
         self.rejected = 0
         self.held = False
+        self.status_warned = False
         # A hold from before this start has done its job. It means somebody
         # moved the rover by hand and pressed the button; the power cycle it
         # asks for is this start, and the seed has already run. Leaving it set
@@ -208,7 +216,9 @@ class PoseMemory(Node):
             return
         x, y = msg.pose.position.x, msg.pose.position.y
         occ = self.cell(x, y)
-        if occ is None or occ < 0 or occ > FREE_MAX:
+        ok = occ is not None and 0 <= occ <= FREE_MAX
+        self.report(x, y, occ, ok)      # every sample, whether it is saved or not
+        if not ok:
             # Off the grid, in unknown space, or inside a wall. Cartographer
             # has been all three while the rover sat still; none of them are
             # worth waking up believing.
@@ -219,6 +229,25 @@ class PoseMemory(Node):
                     f"not saving ({x:.2f}, {y:.2f}): {where}")
             return
         self.write(x, y, msg.pose.orientation.z, msg.pose.orientation.w, occ)
+
+    def report(self, x, y, occ, ok):
+        """Say where Cartographer thinks it is and whether that is anywhere
+        real, so the pages can show it. Best effort: a rover whose status file
+        cannot be written should still record poses, so failure warns once and
+        is otherwise ignored."""
+        payload = json.dumps({"t": time.time(), "x": round(x, 4),
+                              "y": round(y, 4), "cell": occ, "ok": ok})
+        try:
+            d = os.path.dirname(STATUS_PATH)
+            os.makedirs(d, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=d)
+            with os.fdopen(fd, "w") as f:
+                f.write(payload)
+            os.replace(tmp, STATUS_PATH)
+        except OSError as e:
+            if not self.status_warned:
+                self.get_logger().warn(f"cannot write {STATUS_PATH}: {e}")
+                self.status_warned = True
 
     def write(self, x, y, qz, qw, occ):
         """Replace the file atomically -- a power cut must not leave half of
