@@ -275,6 +275,22 @@ class GoalPoseSender(Node):
     }
     LIVE = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
 
+    # Discovery: this process is born again on every button press, and has to
+    # find bt_navigator before it can publish to it. On a Pi already running
+    # Nav2 and Cartographer, at the nice level the page hands down, that has
+    # taken longer than the five seconds this used to allow.
+    MATCH_TIMEOUT_S = 10.0
+    # Publishing once and hoping is not enough. A sample published in the
+    # window just after the subscription matches can still be dropped -- the
+    # same trap as /initialpose, and the reason sending a goal by hand wants
+    # `ros2 topic pub --times 3` rather than a single message. Waiting for a
+    # subscriber narrows that window; it does not close it. So publish, wait
+    # for the status topic to name a goal that was not live before, and
+    # publish again if it does not. The wait is generous because a second
+    # goal would preempt the first and be reported back as "cancelled".
+    ACK_TIMEOUT_S = 2.0
+    ACK_TRIES = 4
+
     def __init__(self, on_done=None):
         super().__init__("rover_nav")
         self.cb = ReentrantCallbackGroup()
@@ -284,6 +300,7 @@ class GoalPoseSender(Node):
         self._lock = threading.Lock()
         self._target = None          # room name currently being driven to
         self._uuid = None            # our goal, once it appears in the status
+        self._live = set()           # every goal live as of the last status
         self._before = set()         # goals already live when we published
         self._settled = False
 
@@ -310,6 +327,13 @@ class GoalPoseSender(Node):
 
     def _status_cb(self, msg):
         with self._lock:
+            # Kept up to date whether or not we have a goal of our own: this
+            # is what go_to_room snapshots into _before, and it has to be
+            # populated *before* we publish to be worth anything. The status
+            # topic is transient-local, so the first message lands on
+            # subscribe, not on the next transition.
+            self._live = {bytes(st.goal_info.goal_id.uuid)
+                          for st in msg.status_list if st.status in self.LIVE}
             if self._target is None or self._settled:
                 return
             if self._uuid is None:
@@ -338,15 +362,18 @@ class GoalPoseSender(Node):
     # ------------------------------------------------------------- commands
 
     def go_to_room(self, room):
-        """Publish the goal. Returns (ok, message) immediately."""
+        """Publish the goal and wait for Nav2 to take it.
+
+        Returns (ok, message) once the status topic names our goal, or once
+        it is clear it never will. Not instant any more, by design: "sent"
+        used to mean "published", which is not the same thing at all.
+        """
         key = resolve_room(room)
         if key is None:
             return False, f"unknown room '{room}'"
         x, y, qz, qw = ROOMS[key]
 
-        # goal_pose is reliable, but a message published before bt_navigator
-        # has matched is dropped -- the same trap as /initialpose.
-        deadline = time.time() + 5.0
+        deadline = time.time() + self.MATCH_TIMEOUT_S
         while self._pub.get_subscription_count() == 0:
             if time.time() > deadline:
                 return False, "nothing subscribed to /goal_pose -- is nav2 running?"
@@ -356,14 +383,43 @@ class GoalPoseSender(Node):
             self._target = key
             self._uuid = None
             self._settled = False
+            # Whatever is already driving is not ours -- most often the goal
+            # this one is about to preempt, which goes to CANCELED a moment
+            # later and would otherwise be reported as our verdict.
+            self._before = set(self._live)
 
         msg = PoseStamped()
         msg.header.frame_id = "map"
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.pose.position.x, msg.pose.position.y = float(x), float(y)
         msg.pose.orientation.z, msg.pose.orientation.w = float(qz), float(qw)
-        self._pub.publish(msg)
-        return True, f"driving to {key}"
+
+        for _ in range(self.ACK_TRIES):
+            self._pub.publish(msg)
+            until = time.time() + self.ACK_TIMEOUT_S
+            while time.time() < until:
+                with self._lock:
+                    # _uuid is set by the status callback the moment a goal
+                    # appears that was not live when we published. _settled
+                    # covers one that was taken and finished inside the wait.
+                    if self._uuid is not None or self._settled:
+                        return True, f"driving to {key}"
+                time.sleep(0.05)
+
+        # Say so rather than sitting on it. Reporting "sent" for a goal Nav2
+        # never took left the page locked on a drive that was not happening,
+        # with the stop button the only way out -- press stop, press the room
+        # again, and hope the next publish landed.
+        with self._lock:
+            self._target = None
+        # Those publishes may not all have been dropped: one could have landed
+        # and simply not been acknowledged in time. Walking away would leave
+        # Nav2 driving with nobody watching, so cancel anything that did take,
+        # and hold on long enough for the request to leave this process.
+        if self._cancel_cli.service_is_ready():
+            self._cancel_cli.call_async(CancelGoal.Request())
+            time.sleep(0.5)
+        return False, "nav2 never acknowledged the goal on /goal_pose"
 
     def cancel(self):
         """Cancel our goal, or every goal if it never got an id."""
@@ -441,25 +497,38 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, sigterm)
 
-    ok, msg = node.go_to_room(room)
-    if ok:
-        emit("sent", room=room, detail=msg)
-    else:
-        report(room, "failed", msg)
-
     try:
+        # Inside the try: go_to_room blocks for up to five seconds waiting for
+        # bt_navigator to subscribe, and a stop landing in that window is
+        # exactly what somebody who saw nothing happen would send. Outside it,
+        # the interrupt escaped as a traceback -- no cancel, and no verdict for
+        # the page to unlock on.
+        ok, msg = node.go_to_room(room)
+        if ok:
+            emit("sent", room=room, detail=msg)
+        else:
+            report(room, "failed", msg)
+
         # Nothing to report between the goal going out and the verdict coming
         # back, so just wait for it.
         while rclpy.ok() and not done.wait(1.0):
             pass
     except KeyboardInterrupt:
-        node.cancel()
-        emit("done", room=room, outcome="cancelled", detail="")
-        settled.update(outcome="cancelled", detail="")
-        # cancel_goal_async only queues the request. Exiting on top of it
-        # leaves Nav2 driving, so hold the executor open long enough for the
-        # cancel to actually go out.
-        threading.Event().wait(1.5)
+        cancelled, why = node.cancel()
+        if cancelled:
+            emit("done", room=room, outcome="cancelled", detail="")
+            settled.update(outcome="cancelled", detail="")
+            # cancel_goal_async only queues the request. Exiting on top of it
+            # leaves Nav2 driving, so hold the executor open long enough for
+            # the cancel to actually go out.
+            threading.Event().wait(1.5)
+        else:
+            # Nothing reached Nav2, so it is still driving. Reporting this as
+            # "cancelled" told the page the rover had stopped when it had not,
+            # and unlocked the buttons over the top of a live goal.
+            settled.update(outcome="failed", detail=why)
+            emit("done", room=room, outcome="failed",
+                 detail=f"stop not delivered: {why}")
     finally:
         # Stop the executor before the node it is spinning, or the C++ layer
         # aborts as the node is destroyed beneath it.
