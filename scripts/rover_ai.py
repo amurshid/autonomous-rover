@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -712,6 +713,17 @@ def main():
 
     stop_flag = threading.Event()
 
+    # rclpy's own SIGTERM handler tears the context down before the finally
+    # block below runs, which is why the cancel there is guarded by
+    # rclpy.ok() -- and why, under `systemctl stop rover-ai`, it never ran.
+    # A goal the voice loop had sent then went on driving with nothing
+    # watching it: Nav2 keeps publishing /cmd_vel, so the bridge's command
+    # timeout never fires, and the mode page reports idle for a goal it did
+    # not send, so its Stop button is not even on screen. Taking the signal
+    # back lets the loop unwind with the context still alive, which is what
+    # makes that cancel reach Nav2.
+    signal.signal(signal.SIGTERM, lambda *_: stop_flag.set())
+
     def voice_loop():
         voice.calibrate()
         voice.say('I am ready.')
@@ -783,8 +795,14 @@ def main():
         # (command_timeout), so a missed stop is covered either way.
         try:
             if rclpy.ok():
-                nav.cancel()
+                cancelled, _ = nav.cancel()
                 motions.do_stop()
+                # cancel_goal_async only queues the request; the executor has
+                # to keep running for it to leave this process. Tearing down
+                # on top of it is the other half of how a goal outlived the
+                # voice loop being stopped.
+                if cancelled:
+                    threading.Event().wait(1.5)
         except Exception:
             pass
         if voice:
