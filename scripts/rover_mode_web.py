@@ -35,6 +35,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(os.environ.get("ROVER_MODE_PORT", "80"))
 TELEOP_PORT = int(os.environ.get("ROVER_TELEOP_PORT", "8080"))
 
+# Where rover_pose_memory keeps the last known pose, and the marker that stops
+# it recording. Both live in a directory this page's user owns, so forgetting
+# a pose needs no privilege -- nothing here is added to the sudoers rule.
+POSE_PATH = os.environ.get("ROVER_LAST_POSE", "/var/lib/rover/last_pose.json")
+POSE_HOLD = os.environ.get("ROVER_POSE_HOLD",
+                           os.path.join(os.path.dirname(POSE_PATH), "hold"))
+
 # rooms.py is the single source of truth for the goal poses and needs no ROS
 # itself, so importing it here costs nothing. If it is missing the page must
 # still come up: losing the room buttons is survivable, losing the mode
@@ -362,12 +369,22 @@ class Navigator:
 NAV = Navigator()
 
 
+def pose_held():
+    """True while the memory is held, so the page can say so.
+
+    A hold outlives nothing but a restart, and one left behind by a power
+    cycle that never happened looks exactly like a broken feature. Saying it
+    out loud is the difference between "held, waiting for you" and silence."""
+    return os.path.exists(POSE_HOLD)
+
+
 def status():
     states = all_states()          # one systemctl for the whole reply
     mode = current_mode(states)
     out = {"mode": mode, "teleop_port": TELEOP_PORT, "nav": NAV.snapshot(),
            "health": rover_health.snapshot() if rover_health else {},
            "ai": states.get(AI_UNIT, "unknown") in AI_LIVE,
+           "pose_held": pose_held(),
            "units": {}}
     for key, m in MODES.items():
         out["units"][key] = [unit_state(u, states) for u in m["units"]]
@@ -539,6 +556,15 @@ PAGE = """<!doctype html>
         border-radius:10px; text-decoration:none;
         animation:rise .3s ease-out; }
   .go:active { transform:scale(.985); }
+  /* Deliberately quiet: rarely needed, and wrong to press casually. */
+  #fpwrap { margin:20px 2px 0; display:flex; align-items:center; gap:10px;
+            flex-wrap:wrap; }
+  #forget { background:none; border:1px solid var(--edge); color:var(--dim);
+            border-radius:8px; padding:7px 12px; font-size:13px; }
+  #forget:disabled { opacity:.45; }
+  #forget:active { transform:scale(.98); }
+  #fpnote { color:var(--dim); font-size:12px; flex:1 1 100%; }
+  #fpnote.held { color:var(--wait); }
   @keyframes rise { from { opacity:0; transform:translateY(4px); } }
 </style></head><body>
 
@@ -560,6 +586,11 @@ PAGE = """<!doctype html>
       <button id="rstop" hidden>Stop</button></div>
     <div class="grid" id="rgrid"></div>
     <p class="rnote" id="rnote"></p>
+  </div>
+
+  <div id="fpwrap">
+    <button id="forget">Forget saved pose</button>
+    <span id="fpnote"></span>
   </div>
 </div>
 
@@ -608,7 +639,42 @@ async function poll() {
     const st = await (await fetch('/api/status')).json();
     paintHealth(st.health);
     if (busy) progress(st); else { paint(st); paintRooms(st); }
+    paintPose(st);       // outside the busy check: a hold still holds mid-switch
   } catch (e) { /* the server restarts during a switch; just retry */ }
+}
+
+/* ------------------------------------------------------------ saved pose */
+
+// Only for a rover carried while switched off. Nothing running can detect
+// that -- the memory is fresh, on free floor, and wrong -- so the wording
+// spells out the one case it is for, and what has to happen afterwards.
+const FORGET_ASK =
+  'Forget where the rover thinks it is?\\n\\n' +
+  'Only if it was moved by hand while switched off.\\n' +
+  'Then park it in the work room and power cycle.';
+
+document.getElementById('forget').onclick = async () => {
+  if (!confirm(FORGET_ASK)) return;
+  const note = document.getElementById('fpnote');
+  note.className = ''; note.textContent = 'forgetting...';
+  try {
+    const j = await (await fetch('/api/pose/forget', {method:'POST'})).json();
+    if (!j.ok) note.textContent = j.detail;
+  } catch (e) { note.textContent = 'no answer from the rover'; }
+  poll();            // the held state comes from the server, not from here
+};
+
+function paintPose(st) {
+  const note = document.getElementById('fpnote');
+  const btn = document.getElementById('forget');
+  btn.disabled = !!st.pose_held;
+  if (st.pose_held) {
+    note.textContent = 'Memory held. Park it in the work room, then power ' +
+                       'cycle -- it will start from there.';
+    note.className = 'held';
+  } else if (note.className === 'held') {
+    note.textContent = ''; note.className = '';   // a restart cleared it
+  }
 }
 
 /* ---------------------------------------------------------------- rooms */
@@ -848,6 +914,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(*NAV.stop())
         if self.path in ("/api/ai/on", "/api/ai/off"):
             return self._ai(self.path.endswith("/on"))
+        if self.path == "/api/pose/forget":
+            return self._forget_pose()
         self._send(404, "not found", "text/plain")
 
     def _ai(self, on):
@@ -865,6 +933,38 @@ class Handler(BaseHTTPRequestHandler):
                                    "rover-ai.service", root=True)
         _cache.update(at=0.0, states=None)   # reflect it on the next poll
         self._reply(code == 0, err or out, code=200 if code == 0 else 500)
+
+    def _forget_pose(self):
+        """Discard the remembered pose, for a rover moved while switched off.
+
+        Nothing running can detect that: the memory is fresh, sits on free
+        floor, and is wrong. Only a person knows, so only a person can say.
+
+        The marker goes down BEFORE the file is removed. The other order has a
+        window -- rover_pose_memory samples every 30s, and a delete that lands
+        just before a sample would be undone by it, leaving a button that
+        visibly did nothing. Held first, the sample is already refusing to
+        write by the time the file goes.
+
+        This does not re-seed anything. Cartographer keeps whatever pose it is
+        holding until it restarts, which is why the confirm text asks for a
+        power cycle rather than implying the rover now knows where it is.
+        """
+        if NAV.snapshot()["phase"] not in ("idle", "arrived", "cancelled",
+                                           "failed", "rejected"):
+            return self._reply(False, "stop the rover first")
+        try:
+            with open(POSE_HOLD, "w"):
+                pass
+        except OSError as e:
+            return self._reply(False, f"could not hold the memory: {e}")
+        try:
+            os.remove(POSE_PATH)
+        except FileNotFoundError:
+            pass                      # already gone; the hold is what matters
+        except OSError as e:
+            return self._reply(False, f"held, but {POSE_PATH} remains: {e}")
+        return self._reply(True, "forgotten")
 
     def _switch(self, key):
         if key not in MODES:
