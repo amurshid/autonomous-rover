@@ -27,6 +27,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -114,20 +115,35 @@ MODES = {
 def systemctl(*args, root=False):
     """Run systemctl, never raising -- the page must survive a failed call.
 
+    Returns (returncode, stdout, stderr), kept apart on purpose. is-active's
+    stdout is positional -- one line per unit asked about -- and systemctl
+    writes warnings on stderr whenever it feels like it, the daemon-reload
+    notice after a unit file is edited being the usual one. Folding the two
+    together shifted every line and left the page reporting a rover that was
+    running fine as entirely unknown.
+
     Only starting a target needs root. Reading state does not, so status works
     before the sudoers rule is installed, and the rule stays narrower.
     """
     cmd = (["sudo", "-n"] if root else []) + ["systemctl", *args]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        return r.returncode, (r.stdout + r.stderr).strip()
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
     except Exception as e:
-        return 1, str(e)
+        return 1, "", str(e)
 
 
 # Every name the page ever asks about, in a fixed order so one systemctl
 # call answers all of them.
 AI_UNIT = "rover-ai.service"
+
+# What counts as the AI having the rover, for locking the room buttons and
+# drawing the toggle. Not just "active": rover-ai takes several seconds to
+# source ROS and open the mic, and reading 'activating' as off made the
+# toggle snap back the instant it was tapped, which looks exactly like the
+# tap being refused. 'deactivating' counts too -- it may still be getting
+# its cancel out, and a room goal sent into that window races it.
+AI_LIVE = ("active", "activating", "deactivating", "reloading")
 
 _WATCHED = ([m["target"] for m in MODES.values()]
             + [f"{u}.service" for m in MODES.values() for u in m["units"]]
@@ -154,13 +170,18 @@ def all_states():
     with _cache_lock:
         if _cache["states"] is not None and now - _cache["at"] < CACHE_S:
             return _cache["states"]
-    code, out = systemctl("is-active", *_WATCHED)
+    code, out, err = systemctl("is-active", *_WATCHED)
     lines = out.splitlines()
     # One line per argument, in order. Anything else and we cannot line them
     # up, so report unknown rather than attributing a state to the wrong unit.
     if len(lines) == len(_WATCHED):
         states = dict(zip(_WATCHED, lines))
     else:
+        # Every unit unknown hides the room buttons and blanks both mode
+        # cards, so it must not happen quietly: this is the one line that
+        # says why the page went dead.
+        print(f"is-active gave {len(lines)} lines for {len(_WATCHED)} units"
+              f" (rc={code}): {err or out!r}", file=sys.stderr, flush=True)
         states = {name: "unknown" for name in _WATCHED}
     with _cache_lock:
         _cache.update(at=now, states=states)
@@ -211,6 +232,10 @@ class Navigator:
 
     IDLE = {"room": None, "phase": "idle", "remaining": None, "detail": ""}
 
+    # rover_nav.py holds itself open for about a second and a half after
+    # SIGTERM to get the cancel to Nav2. This is that, with room to spare.
+    KILL_AFTER_S = 5.0
+
     def __init__(self):
         self._lock = threading.Lock()
         self._proc = None
@@ -243,6 +268,7 @@ class Navigator:
 
         Killing it outright would leave Nav2 driving to a goal with nobody
         watching, which is the one outcome a stop button must not produce.
+        So it gets asked first, and killed only if it does not go.
         """
         with self._lock:
             proc = self._proc
@@ -254,7 +280,28 @@ class Navigator:
             proc.terminate()
         except Exception as e:
             return False, str(e)
+        threading.Timer(self.KILL_AFTER_S, self._kill, args=(proc,)).start()
         return True, "stopping"
+
+    def _kill(self, proc):
+        """SIGKILL a child that ignored SIGTERM.
+
+        SIGTERM is a request, and the page bet everything on it being
+        honoured: a child that never exits holds _proc forever, so the
+        buttons stay locked on "stopping" and every later press is refused
+        with "already driving", for the life of this process. rclpy's
+        shutdown is quite capable of wedging, and there was no way back but
+        restarting the service. The grace period is long enough for
+        rover_nav.py to get its cancel out; past that, the goal is already
+        cancelled and what is left is a process that will not die.
+        """
+        with self._lock:
+            if self._proc is not proc:
+                return               # it went on its own, as it usually does
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
     def _watch(self, proc):
         """Read the child's JSON stream to the end, then reap it."""
@@ -278,6 +325,16 @@ class Navigator:
                     # Held, not published -- see the class docstring.
                     verdict = (ev.get("outcome") or "failed",
                                ev.get("detail") or "")
+                    # The child has said everything it will say; all that is
+                    # left is its own shutdown, and rclpy's can wedge. The
+                    # loop above ends on EOF, which a wedged child never
+                    # gives, so the verdict below is never published: the
+                    # page stays on "driving" for a goal that finished, and
+                    # every later press is swallowed as "already driving".
+                    # Nothing is at stake once the goal has settled, so give
+                    # it the grace period and then take it out.
+                    threading.Timer(self.KILL_AFTER_S, self._kill,
+                                    args=(proc,)).start()
                 elif self._state["phase"] == "stopping":
                     # A stop has landed. A line still in the pipe from before
                     # it must not put the rover back on its way.
@@ -310,7 +367,7 @@ def status():
     mode = current_mode(states)
     out = {"mode": mode, "teleop_port": TELEOP_PORT, "nav": NAV.snapshot(),
            "health": rover_health.snapshot() if rover_health else {},
-           "ai": states.get(AI_UNIT, "unknown").startswith("active"),
+           "ai": states.get(AI_UNIT, "unknown") in AI_LIVE,
            "units": {}}
     for key, m in MODES.items():
         out["units"][key] = [unit_state(u, states) for u in m["units"]]
@@ -804,10 +861,10 @@ class Handler(BaseHTTPRequestHandler):
         # be stopped first, in the way that reaches Nav2.
         if on:
             NAV.stop()
-        code, out = systemctl("start" if on else "stop", "--no-block",
-                              "rover-ai.service", root=True)
+        code, out, err = systemctl("start" if on else "stop", "--no-block",
+                                   "rover-ai.service", root=True)
         _cache.update(at=0.0, states=None)   # reflect it on the next poll
-        self._reply(code == 0, out, code=200 if code == 0 else 500)
+        self._reply(code == 0, err or out, code=200 if code == 0 else 500)
 
     def _switch(self, key):
         if key not in MODES:
@@ -819,9 +876,9 @@ class Handler(BaseHTTPRequestHandler):
             NAV.stop()
         # Conflicts= in the target files stops the other mode; starting the
         # one we want is the whole operation.
-        code, out = systemctl("start", "--no-block", MODES[key]["target"],
-                              root=True)
-        self._reply(code == 0, out, code=200 if code == 0 else 500)
+        code, out, err = systemctl("start", "--no-block", MODES[key]["target"],
+                                   root=True)
+        self._reply(code == 0, err or out, code=200 if code == 0 else 500)
 
     def _goto(self, room):
         if room not in ROOMS:
