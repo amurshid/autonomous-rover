@@ -1,0 +1,85 @@
+# AMCL localisation against the static house map.
+#
+# Written as a trial alternative to Cartographer pure localisation, which
+# locks onto submaps it builds itself and then has to be restarted. AMCL
+# never builds a map, so that failure mode does not exist here: every update
+# scores particles against house_map.yaml and nothing else.
+#
+# Odometry comes from laser_scan_matcher, not wheels -- the WAVE ROVER bridge
+# is open loop and reports no wheel feedback. See amcl_localization.launch.py.
+
+amcl:
+  ros__parameters:
+    use_sim_time: false
+
+    base_frame_id: "base_link"
+    odom_frame_id: "odom"
+    global_frame_id: "map"
+    # /scan_fixed, not /scan. The LD19's own stamps go backwards, which the
+    # relay corrects; the same reason both costmaps use it.
+    scan_topic: /scan_fixed
+    map_topic: /map
+    tf_broadcast: true
+    # Matches nav2_params.yaml. A Pi under load misses tighter tolerances.
+    transform_tolerance: 0.5
+
+    # seed_pose.py already publishes PoseWithCovarianceStamped to
+    # /initialpose at boot, which AMCL subscribes to natively. So no initial
+    # pose is baked in here, and set_initial_pose.py is not needed at all --
+    # it exists only to bridge /initialpose into Cartographer's trajectory
+    # services, which have no equivalent here.
+    set_initial_pose: false
+    always_reset_initial_pose: false
+
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    # Loose, because the odometry is a scan matcher rather than encoders.
+    # These are the knobs to open further if the cloud collapses too early
+    # and then loses the rover; tighten them if it never converges.
+    alpha1: 0.3      # rotation noise from rotation
+    alpha2: 0.3      # rotation noise from translation
+    alpha3: 0.3      # translation noise from translation
+    alpha4: 0.3      # translation noise from rotation
+    alpha5: 0.2
+
+    # Deliberately modest. The board runs at load 5.65 on 4 cores before
+    # anything is added, and Cartographer was taking 53% of a core; the point
+    # of this experiment is partly to spend less than that.
+    min_particles: 300
+    max_particles: 1500
+    pf_err: 0.05
+    pf_z: 0.99
+
+    update_min_d: 0.15
+    update_min_a: 0.15
+    resample_interval: 1
+
+    # Augmented MCL: inject random particles when the average match
+    # likelihood falls. This is the kidnapped-robot recovery, and Nav2
+    # ships it DISABLED (both default to 0.0). It is the whole reason this
+    # stack can recover on its own where Cartographer needed a restart.
+    recovery_alpha_slow: 0.001
+    recovery_alpha_fast: 0.1
+
+    laser_model_type: "likelihood_field"
+    laser_likelihood_max_dist: 2.0
+    # The LD19 sees to 12 m and the map is complete out to the walls, so
+    # use the sensor's range rather than the 8.0 the map was BUILT with.
+    # Seeing further down a corridor is what breaks the along-axis
+    # ambiguity: two parallel walls constrain heading and lateral position
+    # well and say almost nothing about where you are along them. An 18.5 m
+    # traverse across the house drifted far enough to put the rover inside a
+    # mapped wall, and this costs no extra CPU -- same max_beams, longer
+    # valid range per beam.
+    laser_min_range: 0.1
+    laser_max_range: 12.0
+    # 60 of the LD19's ~450 points. More costs CPU for little accuracy.
+    max_beams: 60
+    sigma_hit: 0.2
+    z_hit: 0.5
+    z_rand: 0.5
+    z_max: 0.05
+    z_short: 0.05
+    lambda_short: 0.1
+    do_beamskip: false
+
+    save_pose_rate: 0.5
