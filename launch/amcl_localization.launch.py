@@ -44,10 +44,12 @@ lifecycle manager, and AMCL just subscribes to its latched /map.
 """
 import os
 from launch import LaunchDescription
+from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 
 HOME = os.path.expanduser('~')
 AMCL_PARAMS = os.path.join(HOME, 'amcl_params.yaml')
+FUSION = os.path.join(HOME, 'imu_odom_fusion.py')
 
 
 def generate_launch_description():
@@ -80,9 +82,13 @@ def generate_launch_description():
                 'laser_frame': 'base_laser',
                 'base_frame': 'base_link',
                 'odom_frame': 'odom',
-                # Default is "" which DISABLES odometry publication entirely.
-                'publish_odom': '/odom',
-                'publish_tf': True,
+                # /odom_raw, not /odom: imu_odom_fusion consumes this and
+                # republishes as /odom, filling the gaps between matches.
+                'publish_odom': '/odom_raw',
+                # The fusion node owns odom->base_link. Exactly one publisher
+                # of a transform, always -- two corrupts tf2's cache for that
+                # link, which a duplicate matcher demonstrated on night one.
+                'publish_tf': False,
 
                 # Keyframe thresholds: below these the matcher holds its
                 # reference scan instead of re-matching, which is what keeps
@@ -99,7 +105,19 @@ def generate_launch_description():
                 # pose. Defaults; tighten if jumps appear.
                 'max_linear_correction': 0.5,
                 'max_angular_correction_deg': 45.0,
-                'max_iterations': 10,
+                # 10 -> 5. This node was measured at 72% of a core, which is
+                # ~72 ms of ICP per scan, and its odom->base_link transform
+                # is only ever as fresh as its last completed match. Measured
+                # with tf2_monitor: 210-385 ms average delay, 1.2 s peak.
+                #
+                # That delay is harmless driving straight (250 ms at 0.3 m/s
+                # is 7.5 cm) and ruinous turning (250 ms at 2 rad/s is 29
+                # degrees), which is exactly the observed failure: the scans
+                # only come off the map during rotation.
+                #
+                # Halving the iterations halves the per-scan cost. Judge it
+                # by re-running tf2_monitor, not by eye.
+                'max_iterations': 5,
 
                 # Off by default. AMCL does not read odom covariance -- it
                 # uses its own alpha* motion noise -- so this stays off
@@ -110,6 +128,26 @@ def generate_launch_description():
             # It reads base_link -> base_laser off /tf, which the LD19
             # launch already publishes.
             remappings=[('scan', '/scan_fixed')],
+        ),
+
+        # Publishes odom->base_link at the IMU's 20 Hz by integrating the
+        # gyro between scan matches, instead of only when a match completes.
+        #
+        # Measured with tf2_monitor, matcher owning the transform directly:
+        # average delay 0.156-0.198 s, peak 0.933 s. And /odom's interval was
+        # min 0.041s / max 0.369s against a metronomic 10 Hz scan -- the
+        # matcher is bursty, not slow, so the transform has holes several
+        # scan-periods wide. At 6 rad/s a 369 ms hole is 127 degrees of
+        # rotation with the pose frozen, which is why this only ever breaks
+        # while turning.
+        #
+        # This is the pose extrapolator Cartographer has and an external scan
+        # matcher does not. Judge it with tf2_monitor, not by eye -- that
+        # mistake is why this node was written off once already.
+        ExecuteProcess(
+            cmd=['python3', FUSION],
+            name='imu_odom_fusion',
+            output='screen',
         ),
 
         Node(

@@ -108,6 +108,20 @@ class ImuOdomFusion(Node):
         # this its scans are smeared and its correspondences are collapsing,
         # so its heading is worse than the gyro's.
         self.declare_parameter('yaw_trust_max_rate', 0.5)  # rad/s
+        # Threshold for discarding csm's TRANSLATION, kept equal to the yaw
+        # one by default because that is what was measured to work.
+        #
+        # Raising it to 3.0 was tried -- on the theory that 0.5 rad/s is a
+        # gentle arc rather than a spin, and that gating there was freezing
+        # the pose during curves. It brought the rotation misalignment
+        # straight back, and the theory was wrong anyway: the freeze happens
+        # during STRAIGHT driving, where the rate is ~0 and this gate is
+        # already open. It never fired in the case it was blamed for.
+        #
+        # Above 0.5 rad/s csm's whole pose estimate degrades, translation
+        # included -- measured once as the local costmap disagreeing with its
+        # own scan's sensor origin by 2.8 m mid-turn.
+        self.declare_parameter('translation_reject_rate', 0.5)  # rad/s
 
         g = self.get_parameter
         self.odom_frame = g('odom_frame').value
@@ -119,6 +133,7 @@ class ImuOdomFusion(Node):
         self.still_ang = float(g('still_angular').value)
         self.k_yaw = float(g('yaw_correct_gain').value)
         self.trust_max = float(g('yaw_trust_max_rate').value)
+        self.trans_reject = float(g('translation_reject_rate').value)
 
         # Fused state, in the odom frame.
         self.x = 0.0
@@ -133,6 +148,21 @@ class ImuOdomFusion(Node):
 
         self.pub = self.create_publisher(Odometry, g('odom_out').value, 10)
         self.tf = TransformBroadcaster(self)
+
+        # Publish on a TIMER, not from the IMU callback.
+        #
+        # Publishing only when an IMU message arrives makes the liveness of
+        # odom->base_link depend on one serial device that shares its line
+        # with the motor commands -- and that stream is bursty (measured: min
+        # 0.001 s, max 0.184 s between messages). When it stalled, the
+        # transform froze, AMCL could no longer transform scans, so it never
+        # updated, so map->odom froze too, and every Nav2 server died with
+        # "latest data is at <a timestamp six seconds ago>".
+        #
+        # The matcher never had this problem: it published per scan, and the
+        # lidar does not stall. Integrating on the IMU is right; depending on
+        # it to keep the transform alive is not.
+        self.create_timer(1.0 / 20.0, self.publish_current)
 
         # The scan matcher publishes /odom RELIABLE, so plain default QoS.
         self.create_subscription(
@@ -173,7 +203,6 @@ class ImuOdomFusion(Node):
 
         self.rate = raw - self.bias
         self.yaw = wrap(self.yaw + self.rate * dt)
-        self.publish(msg.header.stamp)
 
     def is_still(self):
         if self.csm_twist is None:
@@ -200,24 +229,51 @@ class ImuOdomFusion(Node):
         px, py, pyaw = self.prev_csm
         self.prev_csm = (cx, cy, cyaw)
 
-        # CSM's step is expressed in ITS heading, which is not ours any more.
-        # Rotate it into the fused frame before accumulating, or the two
-        # frames shear apart and the position stops meaning anything.
-        dx, dy = cx - px, cy - py
-        c, s = math.cos(self.yaw - pyaw), math.sin(self.yaw - pyaw)
-        self.x += dx * c - dy * s
-        self.y += dx * s + dy * c
+        turning = abs(self.rate) >= self.trust_max
+        spinning = abs(self.rate) >= self.trans_reject
+
+        # Do not accumulate CSM's translation while turning fast. The first
+        # version of this node rejected csm's YAW during rotation and took
+        # its POSITION anyway, on the theory that csm is good at translation
+        # and bad at rotation. That theory is wrong at the moment it matters:
+        # when ICP collapses to twenty correspondences the whole pose
+        # estimate is garbage, position included. Measured: the local costmap
+        # once put the robot 2.8 m from where the same scan's sensor origin
+        # resolved, mid-turn.
+        #
+        # Rotating in place is also the case where true translation is zero,
+        # so refusing to integrate it costs almost nothing and avoids
+        # importing a metre-scale jump.
+        if not spinning:
+            # CSM's step is expressed in ITS heading, which is not ours any
+            # more. Rotate it into the fused frame before accumulating, or
+            # the two frames shear apart and position stops meaning anything.
+            dx, dy = cx - px, cy - py
+            c, s = math.cos(self.yaw - pyaw), math.sin(self.yaw - pyaw)
+            self.x += dx * c - dy * s
+            self.y += dx * s + dy * c
 
         # Let CSM pull the heading back, but only as far as it is credible:
         # full weight when barely turning, nothing at all above trust_max,
         # where its scans are smeared and its correspondences are collapsing.
-        trust = 1.0 - min(abs(self.rate) / self.trust_max, 1.0)
+        trust = 0.0 if turning else 1.0 - abs(self.rate) / self.trust_max
         if trust > 0.0:
             err = wrap(cyaw - self.yaw)
             dt = 1.0 / 10.0             # CSM runs at the scan rate
             self.yaw = wrap(self.yaw + self.k_yaw * trust * err * dt)
 
     # -- output -------------------------------------------------------------
+
+    def publish_current(self):
+        """Timer tick: emit the current estimate whatever the IMU is doing.
+
+        Stamped now() rather than with the last IMU stamp, so a stalled
+        sensor produces a transform that is merely UNCHANGED rather than one
+        that is stale -- consumers can still look it up, and a rover that is
+        not being told anything new is better served by a frozen pose than by
+        no pose at all.
+        """
+        self.publish(self.get_clock().now().to_msg())
 
     def publish(self, stamp):
         qz = math.sin(self.yaw / 2.0)

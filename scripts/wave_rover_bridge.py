@@ -40,13 +40,17 @@ class WaveRoverBridge(Node):
         # at 1 Hz, which is useless for anything but a battery gauge. A scan
         # is 100 ms; a rotation prior has to keep up with that.
         #
-        # 0.05 polls every tick (telemetry_every = round(0.05 * tick_hz 20)
-        # = 1), so 20 Hz -- the ceiling without raising tick_hz, which would
-        # also change the dither PWM cycle the motor deadband depends on.
-        # Leave tick_hz alone.
+        # 0.05 gives 20 Hz. It costs: this node measured 27.8% of a core at
+        # 20 Hz against ~11% at 1 Hz. That is only worth paying because
+        # imu_odom_fusion publishes odom->base_link at THIS rate, filling the
+        # gaps between scan matches -- and the gaps are the problem. Measured
+        # on /odom: nominally 10 Hz, actually min 0.041s max 0.369s. A 369 ms
+        # hole in the transform is 127 degrees of unmodelled rotation at 6
+        # rad/s. Publishing twice as often as the matcher can match is the
+        # entire point; 10 Hz would just track the holes.
         #
-        # Cost: ~3 KB/s on a 115200 line that was carrying 0.8, and 20x the
-        # JSON parsing. The battery file stays at 1 Hz on its own limiter.
+        # Drop it back to 0.1 or 1.0 the moment nothing consumes /imu/data.
+        # The battery file stays at 1 Hz on its own limiter either way.
         self.declare_parameter('telemetry_period', 0.05)
         # Must be Cartographer's tracking_frame, which wave_rover.lua sets to
         # base_laser. Cartographer refuses anything else outright:
