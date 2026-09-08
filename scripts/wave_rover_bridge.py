@@ -35,7 +35,19 @@ class WaveRoverBridge(Node):
         # polling the board twenty times a second for it is serial traffic
         # and CPU spent on a topic with no subscriber. The Imu message is
         # still published, dormant, if fusion is ever tried again.
-        self.declare_parameter('telemetry_period', 1.0)
+        # The board answers T:130 with battery AND the full IMU line, so this
+        # period sets the /imu/data rate too -- and at 1.0 the gyro published
+        # at 1 Hz, which is useless for anything but a battery gauge. A scan
+        # is 100 ms; a rotation prior has to keep up with that.
+        #
+        # 0.05 polls every tick (telemetry_every = round(0.05 * tick_hz 20)
+        # = 1), so 20 Hz -- the ceiling without raising tick_hz, which would
+        # also change the dither PWM cycle the motor deadband depends on.
+        # Leave tick_hz alone.
+        #
+        # Cost: ~3 KB/s on a 115200 line that was carrying 0.8, and 20x the
+        # JSON parsing. The battery file stays at 1 Hz on its own limiter.
+        self.declare_parameter('telemetry_period', 0.05)
         # Must be Cartographer's tracking_frame, which wave_rover.lua sets to
         # base_laser. Cartographer refuses anything else outright:
         #

@@ -10,9 +10,12 @@ localised in geometry it built for itself. Restarting is the only known cure,
 because a restart is the only thing that deletes those submaps.
 
 AMCL never builds a map. Every update scores particles against the static
-house_map.yaml, so there is nothing self-referential to lock onto, and
-augmented MCL (recovery_alpha_* in amcl_params.yaml) injects random particles
-when the match degrades -- recovering without a process restart.
+house_map.yaml, so there is nothing self-referential to lock onto.
+
+Augmented MCL -- the random-particle injection that recovers a kidnapped
+robot -- was the other half of that argument, and it is currently OFF. It
+fired on the slow drift this rover has and relocalised the filter to the
+wrong part of the house. See recovery_alpha_* in amcl_params.yaml.
 
 Odometry
 --------

@@ -17,6 +17,10 @@ amcl:
     global_frame_id: "map"
     # /scan_fixed, not /scan. The LD19's own stamps go backwards, which the
     # relay corrects; the same reason both costmaps use it.
+    #
+    # scan_deskew.py sat here for a while, un-warping intra-scan rotation.
+    # It made no observable difference either way and is out of the pipeline;
+    # see the note at the top of that file before wiring it back in.
     scan_topic: /scan_fixed
     map_topic: /map
     tf_broadcast: true
@@ -32,11 +36,20 @@ amcl:
     always_reset_initial_pose: false
 
     robot_model_type: "nav2_amcl::DifferentialMotionModel"
-    # Loose, because the odometry is a scan matcher rather than encoders.
-    # These are the knobs to open further if the cloud collapses too early
-    # and then loses the rover; tighten them if it never converges.
-    alpha1: 0.3      # rotation noise from rotation
-    alpha2: 0.3      # rotation noise from translation
+    # alpha1/alpha2 raised from 0.3 to 0.7. These say how far AMCL distrusts
+    # the odometry's ROTATION, and the observed failure is the pose slowly
+    # rotating away from the walls while driving. laser_scan_matcher's
+    # heading is the weak part of its estimate -- a 100 ms sweep taken while
+    # turning is not a rigid snapshot, and csm has no motion prior to lean
+    # on -- so at 0.3 the filter was following bad odometry rotation instead
+    # of believing the scan match against the map. Higher means the laser
+    # wins that argument.
+    #
+    # Translation noise (alpha3/alpha4) left alone: the matcher's position
+    # is the half it does well, and loosening everything at once would just
+    # make the cloud fat in every direction.
+    alpha1: 0.7      # rotation noise from rotation
+    alpha2: 0.7      # rotation noise from translation
     alpha3: 0.3      # translation noise from translation
     alpha4: 0.3      # translation noise from rotation
     alpha5: 0.2
@@ -53,27 +66,40 @@ amcl:
     update_min_a: 0.15
     resample_interval: 1
 
-    # Augmented MCL: inject random particles when the average match
-    # likelihood falls. This is the kidnapped-robot recovery, and Nav2
-    # ships it DISABLED (both default to 0.0). It is the whole reason this
-    # stack can recover on its own where Cartographer needed a restart.
-    recovery_alpha_slow: 0.001
-    recovery_alpha_fast: 0.1
+    # Augmented MCL, DISABLED for now -- these were 0.001 / 0.1.
+    #
+    # It injects random particles when the average match likelihood falls,
+    # which is the textbook kidnapped-robot recovery and was the headline
+    # argument for AMCL over Cartographer. On this rover it backfired: the
+    # pose drifts slowly during driving, the likelihood falls with it, the
+    # injection fires, and the filter re-converges somewhere else entirely
+    # -- observed as the scans jumping to a different part of the house.
+    # In a map with this much repeated geometry (parallel corridors, similar
+    # rooms) a scattered filter has plenty of wrong places to land.
+    #
+    # Turning it off makes drift stay drift instead of becoming teleportation.
+    # Drift is visible and correctable; a confident jump across the house is
+    # neither. Revisit once the underlying drift is understood.
+    recovery_alpha_slow: 0.0
+    recovery_alpha_fast: 0.0
 
     laser_model_type: "likelihood_field"
     laser_likelihood_max_dist: 2.0
-    # The LD19 sees to 12 m and the map is complete out to the walls, so
-    # use the sensor's range rather than the 8.0 the map was BUILT with.
-    # Seeing further down a corridor is what breaks the along-axis
-    # ambiguity: two parallel walls constrain heading and lateral position
-    # well and say almost nothing about where you are along them. An 18.5 m
-    # traverse across the house drifted far enough to put the rover inside a
-    # mapped wall, and this costs no extra CPU -- same max_beams, longer
-    # valid range per beam.
+    # Back to 8.0, matching the range Cartographer used to BUILD the map.
+    # 12.0 was tried on the theory that seeing further down a corridor
+    # breaks the along-axis ambiguity. It was never validated, and it has a
+    # real cost: the LD19's returns get noisy well before its 12 m spec
+    # indoors, and beams landing at 9-12 m are matched against geometry the
+    # map assembled from other viewpoints. Bad long beams lower the match
+    # score for a correct pose, which is the opposite of helpful.
     laser_min_range: 0.1
-    laser_max_range: 12.0
-    # 60 of the LD19's ~450 points. More costs CPU for little accuracy.
-    max_beams: 60
+    laser_max_range: 8.0
+    # 120 of the LD19's ~499 points, up from 60. Sixty is thin for pinning
+    # down YAW specifically -- which is the axis observed rotating away --
+    # because heading is constrained by the angular distribution of hits,
+    # and half the beams is half the evidence. Costs CPU linearly; if the
+    # board cannot take it, this is the first thing to put back.
+    max_beams: 120
     sigma_hit: 0.2
     z_hit: 0.5
     z_rand: 0.5
