@@ -44,7 +44,13 @@ controller_server:
       max_lookahead_dist: 0.8
       lookahead_time: 1.5
       transform_tolerance: 0.5
-      use_velocity_scaled_lookahead_dist: true
+      # Nothing publishes /odom on this rover, so velocity scaling read zero
+      # speed and pinned the lookahead at min_lookahead_dist, 0.3 m. On a drive
+      # the angular command then sat at desired_linear_vel /
+      # regulated_linear_scaling_min_radius -- exactly 1.40 -- most of the way,
+      # broken by full stops and rotate-in-place bursts: slow, pulsing driving.
+      # Use lookahead_dist as a fixed lookahead instead.
+      use_velocity_scaled_lookahead_dist: false
       min_approach_linear_velocity: 0.06
       approach_velocity_scaling_dist: 0.5
       use_collision_detection: true
