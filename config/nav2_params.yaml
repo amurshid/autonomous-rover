@@ -4,21 +4,14 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 10
-    # Milliseconds the tree waits for a server to *acknowledge* a goal
-    # request -- patience, not behaviour. At 20 it lost a goal that was
-    # working: three paths planned, the rover driving, then within 270ms
-    # compute_path_to_pose, spin, wait, backup and a costmap service all
-    # timed out at once and the goal aborted. The servers were fine --
-    # "spin completed successfully" four seconds later. They just could not
-    # answer inside 20ms on a Pi with ordinary scheduling jitter.
-    #
-    # Costs nothing when a server answers promptly, which is nearly always.
+    # Kept from the later tuning at the user's request: milliseconds the tree
+    # waits for a server to *acknowledge* a goal, not to act on it. At 20 a
+    # working goal was lost -- compute_path_to_pose, spin, wait, backup and a
+    # costmap service all timed out inside 270ms while the rover was driving
+    # fine, and "spin completed successfully" arrived four seconds later. The
+    # servers were healthy; they just could not answer in 20ms on a Pi with
+    # ordinary scheduling jitter. Costs nothing when they answer promptly.
     default_server_timeout: 200
-    # Copied from the installed tree so BackUp can be given a usable speed.
-    # Nav2's default is 0.05 m/s, which lands under the bridge's
-    # straight_deadband: the motors pulse instead of turning and every backup
-    # recovery timed out after ten seconds. See deploy/systemd/README.md.
-    default_nav_to_pose_bt_xml: "/home/amurshid/nav_to_pose_bt.xml"
     transform_tolerance: 0.5
 
 controller_server:
@@ -35,7 +28,7 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.25
-      movement_time_allowance: 20.0
+      movement_time_allowance: 45.0
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
@@ -75,8 +68,8 @@ local_costmap:
       global_frame: odom
       robot_base_frame: base_link
       rolling_window: true
-      width: 3
-      height: 3
+      width: 6
+      height: 6
       resolution: 0.05
       robot_radius: 0.13
       transform_tolerance: 0.5
@@ -86,23 +79,16 @@ local_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          # /scan_fixed, not /scan. The LD19's own stamps go backwards --
-          # that is why scan_timestamp_relay exists -- and Cartographer has
-          # always consumed the corrected topic. Nav2 was still marking
-          # obstacles with the raw ones, so the two halves of the stack
-          # disagreed about when each scan happened, by as much as 0.15s.
-          # It also puts a second and third subscriber on the topic the relay
-          # is reading, which changes the driver's delivery timing to it.
-          topic: /scan_fixed
+          topic: /scan
           sensor_frame: base_laser
           data_type: "LaserScan"
           clearing: True
           marking: True
           min_obstacle_height: -0.5
           max_obstacle_height: 2.0
-          obstacle_max_range: 2.5
+          obstacle_max_range: 6.0
           obstacle_min_range: 0.12
-          raytrace_max_range: 3.0
+          raytrace_max_range: 7.0
           raytrace_min_range: 0.12
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -114,7 +100,7 @@ global_costmap:
   global_costmap:
     ros__parameters:
       update_frequency: 1.0
-      publish_frequency: 0.2
+      publish_frequency: 1.0
       global_frame: map
       robot_base_frame: base_link
       resolution: 0.05
@@ -130,14 +116,7 @@ global_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          # /scan_fixed, not /scan. The LD19's own stamps go backwards --
-          # that is why scan_timestamp_relay exists -- and Cartographer has
-          # always consumed the corrected topic. Nav2 was still marking
-          # obstacles with the raw ones, so the two halves of the stack
-          # disagreed about when each scan happened, by as much as 0.15s.
-          # It also puts a second and third subscriber on the topic the relay
-          # is reading, which changes the driver's delivery timing to it.
-          topic: /scan_fixed
+          topic: /scan
           sensor_frame: base_laser
           data_type: "LaserScan"
           clearing: True
@@ -165,7 +144,7 @@ planner_server:
     GridBased:
       plugin: "nav2_navfn_planner/NavfnPlanner"
       tolerance: 0.6
-      use_astar: true
+      use_astar: false
       allow_unknown: true
 
 behavior_server:
@@ -182,10 +161,11 @@ behavior_server:
       plugin: "nav2_behaviors/BackUp"
     wait:
       plugin: "nav2_behaviors/Wait"
-    global_frame: odom
+    local_frame: odom
+    global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 0.5
     simulate_ahead_time: 1.0
     max_rotational_vel: 10.0
-    min_rotational_vel: 6.0
-    rotational_acc_lim: 200.0
+    min_rotational_vel: 1.0
+    rotational_acc_lim: 2.0
