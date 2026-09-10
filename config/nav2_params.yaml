@@ -14,13 +14,11 @@ bt_navigator:
     #
     # Costs nothing when a server answers promptly, which is nearly always.
     default_server_timeout: 200
-    # No default_nav_to_pose_bt_xml: back to Nav2's own tree, which is how this
-    # ran until 2026-09-04. The override existed only to raise BackUp from
-    # 0.05 m/s -- under the bridge's straight_deadband, so backup recoveries
-    # timed out against a motionless rover. That trade is accepted again here:
-    # a recovery that does nothing is preferred to one that surprises you.
-    # deploy/nav_to_pose_bt.xml keeps the override if it is ever wanted back;
-    # restoring it is this one line.
+    # Copied from the installed tree so BackUp can be given a usable speed.
+    # Nav2's default is 0.05 m/s, which lands under the bridge's
+    # straight_deadband: the motors pulse instead of turning and every backup
+    # recovery timed out after ten seconds. See deploy/systemd/README.md.
+    default_nav_to_pose_bt_xml: "/home/amurshid/nav_to_pose_bt.xml"
     transform_tolerance: 0.5
 
 controller_server:
