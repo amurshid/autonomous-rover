@@ -171,11 +171,10 @@ behavior_server:
       plugin: "nav2_behaviors/BackUp"
     wait:
       plugin: "nav2_behaviors/Wait"
-    local_frame: odom
-    global_frame: map
+    global_frame: odom
     robot_base_frame: base_link
     transform_tolerance: 0.5
     simulate_ahead_time: 1.0
     max_rotational_vel: 10.0
-    min_rotational_vel: 1.0
-    rotational_acc_lim: 2.0
+    min_rotational_vel: 6.0
+    rotational_acc_lim: 200.0
