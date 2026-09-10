@@ -150,7 +150,12 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.25
+        # At 0.25 the cost fell away within a few cm of the footprint and NavFn
+        # rode its edge: 18.6% of the planned tour within 0.30 m of a wall, and
+        # the legs that hugged walls logged most of the 'collision ahead' stops.
+        # 0.45 halves that (8.9%) for 6% more path; 0.55 bought nothing more.
+        # Global only -- the controller's collision check reads lethal cells.
+        inflation_radius: 0.45
       always_send_full_costmap: False
 
 map_server:
