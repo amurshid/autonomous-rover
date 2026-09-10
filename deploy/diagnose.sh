@@ -1,7 +1,6 @@
 #!/bin/bash
-# Dump every fact needed to diagnose the rover, for pasting back.
-# Run with a mode active. Regenerate the manifest from the Mac when
-# repo files change -- the shas below are a snapshot, not live.
+# Compare every deployed file against the repo. Regenerated on the Mac
+# whenever repo files change. Snapshot taken 2026-09-10 16:18.
 cat >/dev/shm/rover.manifest <<'MANIFEST'
 06403e1003d14166  /home/amurshid/odom_publisher.py
 81ad1aca9305fd1a  /home/amurshid/patrol.py
@@ -24,13 +23,14 @@ bf363702f18ee9d2  /home/amurshid/set_initial_pose.py
 6046c74d442e92cd  /home/amurshid/vpr_relocalise.py
 732e8e8ac9994480  /home/amurshid/wait_for_localisation.py
 fc281fa9867d085e  /home/amurshid/wave_rover_bridge.py
-dadcce9f86c7be08  /home/amurshid/cartographer_localization.launch.py
 a0a024374f32d574  /home/amurshid/cartographer.launch.py
+dadcce9f86c7be08  /home/amurshid/cartographer_localization.launch.py
 ee0695f0ca94c100  /home/amurshid/nav2.launch.py
-ccf7f5485e2f19ea  /home/amurshid/start_localization.sh
-e47eee78ee84143c  /home/amurshid/nav2_params.yaml
-48fc8f42d7ebc16c  /home/amurshid/cartographer_config/wave_rover_localization.lua
-dc3597710688e05d  /home/amurshid/cartographer_config/wave_rover.lua
+d70817eb2fd4a145  /home/amurshid/start_localization.sh
+04bd22e5b7ec9610  /home/amurshid/nav2_params.yaml
+0d25c8a53cb75ce3  /home/amurshid/cartographer_config/wave_rover.lua
+1344c7185f04ea92  /home/amurshid/cartographer_config/wave_rover_localization.lua
+01776ec473b7ed87  /home/amurshid/nav_to_pose_bt.xml
 47fe2576b3698341  /etc/systemd/system/rover-ai.service
 250a68122bc3d850  /etc/systemd/system/rover-bridge.service
 ee0a2fca16add8b2  /etc/systemd/system/rover-camera.service
@@ -53,32 +53,15 @@ while read -r want path; do
   b=$(basename "$path")
   if [ ! -e "$path" ]; then echo "  MISSING  $b"; continue; fi
   got=$(sha256sum "$path" 2>/dev/null | cut -c1-16)
-  [ "$got" = "$want" ] && ok=$((ok+1)) || printf '  DIFFERS  %-34s pi=%s repo=%s\n' "$b" "$got" "$want"
+  [ "$got" = "$want" ] && ok=$((ok+1)) || printf '  STALE    %-34s pi=%s repo=%s\n' "$b" "$got" "$want"
 done </dev/shm/rover.manifest
-echo "  ($ok files match)"
-
-echo "══════ BRANCH CONTAMINATION"
-grep -l 'amcl\|laser_scan_matcher\|emcl' ~/nav2_params.yaml ~/*.launch.py 2>/dev/null || echo "  clean"
-
-echo "══════ UNITS"
-systemctl is-active rover-bridge rover-lidar rover-cartographer rover-initialpose \
-  rover-seedpose rover-posememory rover-nav2 rover-mode 2>&1 | paste -sd' ' -
-
-echo "══════ ROS RUNTIME"
-source /opt/ros/humble/setup.bash 2>/dev/null
-source ~/ros2_ws/install/setup.bash 2>/dev/null
-echo "-- scan rates (want /scan and /scan_fixed both ~10Hz):"
-for t in /scan /scan_fixed; do
-  printf '   %-12s %s\n' "$t" "$(timeout 6 ros2 topic hz $t 2>/dev/null | grep -m1 average || echo 'SILENT')"
+echo "  ($ok files current)"
+echo "══════ RELAY (built package -- src, install and build must agree)"
+find ~/ros2_ws -name 'scan_timestamp_relay.py' 2>/dev/null | while read -r f; do
+  printf '  %s  %s\n' "$(sha256sum "$f"|cut -c1-16)" "${f#/home/amurshid/}"; done
+echo "══════ SYMLINK WIRING"
+for t in rover rover-common rover-teleop; do
+  printf '  %-22s %s\n' "$t.target.wants" "$(ls /etc/systemd/system/$t.target.wants/ 2>/dev/null | tr '\n' ' ')"
 done
-echo "-- /odom:"
-printf '   %s\n' "$(timeout 6 ros2 topic hz /odom 2>/dev/null | grep -m1 average || echo 'SILENT -- nothing publishes it')"
-echo "-- who publishes /cmd_vel (more than one is a problem):"
-ros2 topic info /cmd_vel 2>/dev/null | grep -i publisher
-echo "-- TF chain:"
-timeout 4 ros2 run tf2_ros tf2_echo map base_link 2>/dev/null | grep -m1 -A1 'Translation' || echo "   map->base_link MISSING"
-timeout 4 ros2 run tf2_ros tf2_echo odom base_link 2>/dev/null | grep -m1 -A1 'Translation' || echo "   odom->base_link MISSING"
-echo "-- localisation verdict:"
-cat /run/rover/pose_status.json 2>/dev/null; echo
-echo "══════ CARTOGRAPHER CONFIG ACTUALLY LOADED"
-ls -l ~/cartographer_config/
+echo "  stray: $(find /etc/systemd/system -name 'rover-*' -type l | grep -v 'target.wants' | tr '\n' ' ')"
+echo "  enabled: $(systemctl is-enabled rover-mode rover.target rover-teleop.target 2>&1 | tr '\n' ' ')"
