@@ -79,7 +79,12 @@ local_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /scan
+          # /scan_fixed, not /scan. The LD19's own stamps go backwards --
+          # that is why scan_timestamp_relay exists -- and Cartographer has
+          # always consumed the corrected topic. On /scan the two halves of
+          # the stack disagree about when each scan happened, by as much as
+          # the 0.15s the relay corrects.
+          topic: /scan_fixed
           sensor_frame: base_laser
           data_type: "LaserScan"
           clearing: True
@@ -116,7 +121,12 @@ global_costmap:
         enabled: True
         observation_sources: scan
         scan:
-          topic: /scan
+          # /scan_fixed, not /scan. The LD19's own stamps go backwards --
+          # that is why scan_timestamp_relay exists -- and Cartographer has
+          # always consumed the corrected topic. On /scan the two halves of
+          # the stack disagree about when each scan happened, by as much as
+          # the 0.15s the relay corrects.
+          topic: /scan_fixed
           sensor_frame: base_laser
           data_type: "LaserScan"
           clearing: True
