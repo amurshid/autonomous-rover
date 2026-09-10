@@ -54,3 +54,13 @@ vpr_relocalise_log3.txt
 # Fingerprinted on the model, torch, numpy and vpr_relocalise.py, so it
 # re-verifies by itself whenever any of those change.
 .self_test_ok
+
+# Local working notes, not part of the project
+CARTOGRAPHER_DIVERGENCE.md
+
+# rover_backup is an Aug-15 snapshot of the Pi, kept because it is the only
+# record of what the rover ran before. The driver sources inside it are clones
+# of public repos; their .git dirs would become broken gitlinks here.
+rover_backup/ldlidar_src/ldlidar_stl_ros2/
+rover_backup/ros2_ws_src/rf2o_laser_odometry/
+rover_backup/**/__pycache__/
