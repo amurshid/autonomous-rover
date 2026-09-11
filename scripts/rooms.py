@@ -10,6 +10,8 @@ and qy are always zero.
 
 from __future__ import annotations
 
+import re
+
 ROOMS = {
     "work_room":        (  2.276,  8.183, -0.8196,  0.5730),
     "entrance":         ( -2.94,   7.20,  -0.582,  -0.813),
@@ -43,6 +45,18 @@ SPOKEN = {
 }
 
 
+# Who is where. "Go tell person_1 to get ready for dinner" names a person, not
+# a room, and the only thing the rover can drive to is a room -- so the people
+# it might be sent to find are listed here, folded into ALIASES below, and
+# named in rover_ai's system prompt so the model knows whose door to knock on.
+# Both bedroom 2 share a room, so both names point at the same place.
+PEOPLE = {
+    "person_1": "bedroom_1",
+    "person_2":    "bedroom_2",
+    "person_3":    "bedroom_2",
+}
+
+
 # What a person might actually say. The model is told the canonical keys, but
 # it paraphrases, and so do people -- "my room", "bedroom 1's", "the front door".
 # Resolving here means a near-miss reaches the right room instead of failing.
@@ -52,6 +66,10 @@ ALIASES = {
     "person_1":            "bedroom_1",
     "bedroom 1":      "bedroom_1",
     "bedroom 1":     "bedroom_1",
+    "bedroom 2":        "bedroom_2",
+    "bedroom 2":        "bedroom_2",
+    "bedroom 2":            "bedroom_2",
+    "bedroom 2":         "bedroom_2",
     "bedroom 2":       "bedroom_2",
     "bedroom 2":      "bedroom_2",
     "bedroom 2":    "bedroom_2",
@@ -67,11 +85,24 @@ ALIASES = {
 }
 
 
+# A person's name is as good as their room's: "go to person_1" and "go to
+# bedroom 1" are the same journey. Listed after the literal aliases so an
+# explicit entry above always wins.
+for _who, _where in PEOPLE.items():
+    ALIASES.setdefault(_who, _where)
+    ALIASES.setdefault(f"{_who}'s", _where)
+    ALIASES.setdefault(f"{_who}s room", _where)
+    ALIASES.setdefault(f"{_who}'s room", _where)
+del _who, _where
+
+
 def resolve_room(name: str) -> str | None:
     """Map whatever was said to a key in ROOMS, or None if it is not a room."""
     if not name:
         return None
-    n = " ".join(name.strip().lower().replace("_", " ").replace("-", " ").split())
+    # Whisper writes a curly apostrophe; the aliases above use a straight one.
+    n = name.strip().lower().replace("\u2019", "'")
+    n = " ".join(n.replace("_", " ").replace("-", " ").split())
     if n.startswith("the "):
         n = n[4:]
     for candidate in (n, n.replace(" ", "_")):
@@ -81,6 +112,10 @@ def resolve_room(name: str) -> str | None:
         return ALIASES[n]
     # "my room." from speech, or a trailing possessive
     n = n.rstrip(".!?,")
+    if n in ALIASES:
+        return ALIASES[n]
+    # "bedroom 1's", "bedroom 2's" -- a possessive with the room left off.
+    n = re.sub(r"'s$|'$", "", n)
     return ALIASES.get(n)
 
 
