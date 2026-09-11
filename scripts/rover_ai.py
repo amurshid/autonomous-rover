@@ -36,7 +36,7 @@ from groq import Groq
 sys.path.insert(0, os.path.expanduser('~'))
 from rover_motions import Motions
 from rover_nav import RoverNav
-from rooms import ROOM_NAMES, spoken_name
+from rooms import PEOPLE, ROOM_NAMES, spoken_name
 
 # Groq meters tokens per day per model, not per organisation, so each of
 # these carries its own 200k allowance. Exhausting one leaves the rest
@@ -72,6 +72,15 @@ MAX_STEPS = 8          # see Brain.run_sequence
 STOP_WORDS = re.compile(r'\b(stop|cancel|halt|abort|wait|freeze|stay)\b',
                         re.IGNORECASE)
 
+# Rooms belong to people, and a request names the person far more often than
+# the room. Built from rooms.PEOPLE so adding a name there is enough.
+WHO_IS_WHERE = (
+    "Some rooms are somebody's: "
+    + "; ".join(f"{who.title()} is in {where}"
+               for who, where in PEOPLE.items())
+    + ". Two people can share a room. "
+)
+
 SYSTEM = (
     "You are a small four-wheeled robot that drives around a house. Speak in "
     "the first person; never call yourself \"the rover\" or \"the robot\". "
@@ -86,9 +95,18 @@ SYSTEM = (
     "drive or simply speaking is not a journey. "
     "work_room is the user's own room and they may call it \"my room\", but "
     "you call it \"the work room\". "
-    "When a step carries a message for someone, keep the user's wording but "
-    "address the listener: \"you have class tomorrow\", not \"I have class "
-    "tomorrow\". "
+    + WHO_IS_WHERE +
+    "To tell or ask a person something, go to their room and say it there: "
+    "one run_sequence, go_to_room then say. \"Go tell person_1 dinner is "
+    "ready\" is a journey, not just a sentence. "
+    "You carry a message, you are never the one it is about, so address it "
+    "to whoever you were sent to: \"you need to wash the dishes\", never "
+    "\"I need to wash the dishes\". Said of that person, \"he\" and "
+    "\"his\" become \"you\" and \"your\"; the user's own \"my\" and "
+    "\"me\" stay the user's, so \"my room\" is the work room and not "
+    "\"your room\", which they would hear as their own. "
+    "After the word \"say\", the user's words are spoken exactly as given: "
+    "copy their wording into the step, one say step for each \"say\". "
     "If a step already speaks, reply with an empty string. Never announce "
     "completion: no \"Done\", \"Task completed\", \"Let me know if you "
     "need anything else\". The action is the answer. "
@@ -111,7 +129,12 @@ TOOLS = [
             "Returns immediately; the robot announces arrival itself."),
         "parameters": {"type": "object", "properties": {
             "room": {"type": "string", "enum": ROOM_NAMES,
-                     "description": "Destination room."}},
+                     "description": (
+                         "Destination room. To reach a person, send the robot "
+                         "to their room: "
+                         + ", ".join(f"{who.title()} -> {where}"
+                                     for who, where in PEOPLE.items())
+                         + ".")}},
             "required": ["room"]}}},
     {"type": "function", "function": {
         "name": "cancel_navigation",
@@ -167,7 +190,12 @@ TOOLS = [
                                    "description": "for go_to_room; one of "
                                                   "the rooms listed there"},
                           "text": {"type": "string",
-                                   "description": "for say; spoken aloud"},
+                                   "description": (
+                                       "for say; spoken aloud. A message for "
+                                       "someone else is addressed to them -- "
+                                       "\"you need to wash the dishes\" -- "
+                                       "never left in the third person, never "
+                                       "rewritten in the first")},
                           "degrees": {"type": "number",
                                       "description": "for spin"},
                           "meters": {"type": "number",
@@ -179,6 +207,97 @@ TOOLS = [
         "description": "Stop the robot immediately, including any navigation.",
         "parameters": {"type": "object", "properties": {}}}},
 ]
+
+
+# "Go to bedroom 1 and say you need to wash the dishes" has the model
+# read "you" as itself, and what gets delivered is "I need to wash the dishes"
+# -- the message inverted, addressed to nobody, and the errand wasted. The
+# prompt asks for the other reading and usually gets it, but the small models
+# slip back often enough that it is worth catching here as well.
+#
+# The trigger is deliberately narrow. Only when the user actually said "you"
+# and the message came back with no "you" left in it, only first person, has
+# that particular swap happened. "Tell person_3 I will be late" keeps its "I" --
+# the user really is the subject there -- and so does "go to the kitchen and
+# say I have arrived", where the robot is.
+SECOND_PERSON = re.compile(r"\b(you|your|yours|yourself|you're|you've|you'll)\b",
+                           re.IGNORECASE)
+FIRST_PERSON = re.compile(
+    r"\b(i|i'm|i've|i'll|i'd|me|my|mine|myself)\b", re.IGNORECASE)
+# Contractions first: \bI\b would otherwise match inside "I'm".
+FLIPS = [(r"\bI'm\b", "you're"), (r"\bI've\b", "you've"),
+         (r"\bI'll\b", "you'll"), (r"\bI'd\b", "you'd"),
+         (r"\bmyself\b", "yourself"), (r"\bmine\b", "yours"),
+         (r"\bmy\b", "your"), (r"\bme\b", "you"), (r"\bI\b", "you")]
+
+
+# Better still: do not let the model write the message at all. When the user
+# says "say", everything after it is their message word for word, and that is
+# what gets spoken. The model still chooses where to go and when to speak --
+# it just does not author what comes out, so there is nothing left to reword,
+# invert, or address to the wrong person.
+#
+# Only "say" is lifted. "Tell person_1 to get ready" cannot be: taken whole it
+# arrives as "to get ready", which is not a sentence anyone says. Those still
+# go through as_message() below.
+#
+# Only the bare imperative. "person_1 says he is busy" is a report about
+# someone, not an instruction to speak, and splitting on it delivered the
+# tail alone: "he is busy".
+SAY = re.compile(r'\bsay\b', re.IGNORECASE)
+# Where the message stops and the next instruction starts. "Say dinner is
+# ready then come back" must not be delivered as "dinner is ready then come
+# back".
+NEXT_STEP = re.compile(
+    r'\b(?:and\s+then|then|after\s+that|afterwards?|next)\b', re.IGNORECASE)
+# Typed rather than spoken, the message often arrives already quoted, which
+# settles where it ends with no guessing at all.
+QUOTES = '"“”\'‘’'
+QUOTED = re.compile('|'.join(
+    r'^[\s,:]*%s(.+)%s' % (re.escape(a), re.escape(b))
+    for a, b in (('"', '"'), ('“', '”'), ('‘', '’'))), re.DOTALL)
+
+
+def literal_message(utterance, nth=0):
+    """The nth thing the user asked to have said, in their own words."""
+    parts = SAY.split(utterance or '')[1:]      # what followed each "say"
+    if nth >= len(parts):
+        return ''
+    tail = parts[nth]
+    quoted = QUOTED.match(tail)
+    if quoted:
+        tail = next(g for g in quoted.groups() if g is not None)
+    else:
+        tail = NEXT_STEP.split(tail)[0]
+    # "say that dinner is ready" -- the "that" belongs to the request, not to
+    # the message.
+    tail = re.sub(r'^\s*that\s+', '', tail, flags=re.IGNORECASE)
+    tail = tail.strip().strip(QUOTES).strip()
+    who = '|'.join(re.escape(w) for w in PEOPLE)
+    tail = re.sub(r'[\s,]*\bto\s+(?:%s)(?:\s*(?:,|and)\s*(?:%s))*\s*$'
+                  % (who, who), '', tail, flags=re.IGNORECASE)
+    tail = re.sub(r'[\s,]*\b(?:and|to)\s*$', '', tail, flags=re.IGNORECASE)
+    tail = tail.strip(' ,;:')
+    if len(tail) < 2:
+        return ''
+    return tail[0].upper() + tail[1:]
+
+
+def as_message(text, utterance):
+    """Put a relayed message back into the second person the user used."""
+    text = (text or '').strip()
+    if not (text and SECOND_PERSON.search(utterance or '')):
+        return text
+    if SECOND_PERSON.search(text) or not FIRST_PERSON.search(text):
+        return text
+    out = text
+    for pattern, repl in FLIPS:
+        out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
+    # A flip at the start of a sentence leaves it lower case.
+    out = re.sub(r'(^|[.!?]\s+)([a-z])',
+                 lambda m: m.group(1) + m.group(2).upper(), out)
+    print(f'[message re-addressed to the listener: {text!r} -> {out!r}]')
+    return out
 
 
 class Brain:
@@ -199,6 +318,7 @@ class Brain:
         # starts while ask() is still returning, which had the rover deliver a
         # step's message before saying it was on its way.
         self._seq_go = threading.Event()
+        self._utterance = ''                # what the user said, this turn
 
     # ----------------------------------------------------------- sequences
 
@@ -213,6 +333,9 @@ class Brain:
         """
         if not isinstance(steps, list) or not steps:
             return False, 'no steps given'
+        if not all(isinstance(s, dict) for s in steps):
+            return False, ('each step must be an object with an "action", '
+                           'not a bare string')
         if len(steps) > MAX_STEPS:
             # Each leg can take a minute; a runaway list would have the rover
             # driving unattended for an hour with no way to interrupt but
@@ -223,8 +346,9 @@ class Brain:
             return False, 'still working through the last request'
         self._seq_stop.clear()
         self._seq_go.clear()
-        self._seq = threading.Thread(target=self._run_steps, args=(list(steps),),
-                                     daemon=True)
+        self._seq = threading.Thread(
+            target=self._run_steps, args=(list(steps), self._utterance),
+            daemon=True)
         self._seq.start()
         return True, f'started {len(steps)} steps'
 
@@ -243,17 +367,37 @@ class Brain:
         """Let a queued sequence begin. Called once this turn's reply is queued."""
         self._seq_go.set()
 
-    def _run_steps(self, steps):
+    @staticmethod
+    def _message(step_text, utterance, nth):
+        """What to speak: the user's own words wherever they gave them."""
+        literal = literal_message(utterance, nth)
+        if not literal:
+            return as_message(step_text, utterance)
+        if literal != (step_text or '').strip():
+            print(f'[saying your words, not the model\'s: {literal!r}]')
+        return literal
+
+    def _run_steps(self, steps, utterance=''):
+        try:
+            self._steps(steps, utterance)
+        except Exception as e:
+            print(f'[sequence failed at runtime: {e}]')
+            if not self._seq_stop.is_set():
+                self._speak('Something went wrong part way through that.')
+
+    def _steps(self, steps, utterance):
         # Wait for the acknowledgement to be queued first, so "on my way"
         # always precedes anything a step says. The timeout covers a caller
         # that never releases -- late is better than silent.
         self._seq_go.wait(timeout=10.0)
+        said = 0                    # which "say" of the request this step is
         for i, step in enumerate(steps, 1):
             if self._seq_stop.is_set():
                 return
             action = (step.get('action') or '').strip()
             if action == 'say':
-                self._speak(step.get('text', ''))
+                self._speak(self._message(step.get('text', ''), utterance, said))
+                said += 1
                 continue
             if action == 'go_to_room':
                 room = step.get('room', '')
@@ -526,6 +670,7 @@ class Brain:
         # within a turn and the model is told it already has them.
         self._seen = {}
         self._failed = {}
+        self._utterance = text
         self.history.append({"role": "user", "content": text})
         self._trim()
         try:
