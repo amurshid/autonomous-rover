@@ -670,7 +670,7 @@ async function poll() {
 const FORGET_ASK =
   'Forget where the rover thinks it is?\\n\\n' +
   'Only if it was moved by hand while switched off.\\n' +
-  'Then park it in the work room and power cycle.';
+  'Then park it on the charger and power cycle.';
 
 document.getElementById('forget').onclick = async () => {
   if (!confirm(FORGET_ASK)) return;
@@ -702,7 +702,7 @@ function paintPose(st) {
   const btn = document.getElementById('forget');
   btn.disabled = !!st.pose_held;
   if (st.pose_held) {
-    note.textContent = 'Memory held. Park it in the work room, then power ' +
+    note.textContent = 'Memory held. Park it on the charger, then power ' +
                        'cycle -- it will start from there.';
     note.className = 'held';
   } else if (note.className === 'held') {
