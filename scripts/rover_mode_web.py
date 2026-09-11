@@ -649,8 +649,9 @@ function paintHealth(h) {
   const l = document.getElementById('loc');
   const state = h.localisation;
   l.textContent = state === 'off_map' ? 'off map'
+                : state === 'lost'    ? 'lost'
                 : state === 'on_map'  ? 'on map' : '';
-  l.className = state === 'off_map' ? 'bad' : '';
+  l.className = state === 'off_map' || state === 'lost' ? 'bad' : '';
 }
 
 async function poll() {

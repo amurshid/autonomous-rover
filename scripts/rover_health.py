@@ -23,9 +23,10 @@ TELEMETRY = os.environ.get("ROVER_TELEMETRY", "/run/rover/telemetry.json")
 STALE_S = 15.0
 
 # rover_pose_memory writes this every 30s: whether Cartographer's pose stands
-# on the map at all. Read the same way as the battery -- a missing or stale
-# file is "unknown", never an error, because both pages have to keep working
-# when nothing else is running.
+# on the map at all, and whether the lidar scan agrees with the map from
+# there. Read the same way as the battery -- a missing or stale file is
+# "unknown", never an error, because both pages have to keep working when
+# nothing else is running.
 POSE_STATUS = os.environ.get("ROVER_POSE_STATUS",
                              "/run/rover/pose_status.json")
 POSE_STALE_S = 90.0                    # three missed samples
@@ -68,18 +69,27 @@ def battery():
 
 
 def localisation():
-    """('on_map' | 'off_map' | 'unknown', occupancy or None).
+    """('on_map' | 'off_map' | 'lost' | 'unknown', occupancy or None).
 
     off_map means Cartographer's own estimate is in unknown space or inside a
     wall -- it has lost the map while insisting otherwise, which is the
     failure that used to show up only as a goal that would not plan.
+
+    lost is the quieter version: the estimate is on open floor, but the lidar
+    scan laid down there does not land on the map's walls. That is how the
+    rover sat 150 deg out in the living room on 2026-09-11 while this said
+    on_map. unknown also covers a sample with no scan to check against.
     """
     try:
         with open(POSE_STATUS) as f:
             d = json.load(f)
         if time.time() - float(d["t"]) > POSE_STALE_S:
             return "unknown", None     # nobody is sampling; say nothing
-        return ("on_map" if d["ok"] else "off_map"), d.get("cell")
+        verdict = d.get("verdict")
+        if verdict is None:            # a pose memory from before the scan check
+            return ("on_map" if d["ok"] else "off_map"), d.get("cell")
+        return {"matched": "on_map", "lost": "lost",
+                "off_map": "off_map"}.get(verdict, "unknown"), d.get("cell")
     except (OSError, ValueError, KeyError, TypeError):
         return "unknown", None
 
