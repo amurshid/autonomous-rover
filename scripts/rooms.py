@@ -13,7 +13,10 @@ from __future__ import annotations
 import re
 
 ROOMS = {
-    "work_room":        (  2.276,  8.183, -0.8196,  0.5730),
+    # The charging spot, not the old mark at (2.276, 8.183): that sat 0.11 m
+    # from a wall -- a centimetre or two from the 194 x 168 mm chassis, and
+    # inside the 0.13 m radius Nav2 checked against, so arriving stalled.
+    "work_room":        (  1.64,   7.65,  -0.869,   0.494),
     "entrance":         ( -2.94,   7.20,  -0.582,  -0.813),
     "office_room":      ( -0.63,   2.85,  -0.861,   0.509),
     "dining_room":      ( -5.20,   0.03,  -0.184,   0.983),

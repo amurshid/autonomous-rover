@@ -44,7 +44,13 @@ controller_server:
       max_lookahead_dist: 0.8
       lookahead_time: 1.5
       transform_tolerance: 0.5
-      use_velocity_scaled_lookahead_dist: true
+      # Nothing publishes /odom on this rover, so velocity scaling read zero
+      # speed and pinned the lookahead at min_lookahead_dist, 0.3 m. On a drive
+      # the angular command then sat at desired_linear_vel /
+      # regulated_linear_scaling_min_radius -- exactly 1.40 -- most of the way,
+      # broken by full stops and rotate-in-place bursts: slow, pulsing driving.
+      # Use lookahead_dist as a fixed lookahead instead.
+      use_velocity_scaled_lookahead_dist: false
       min_approach_linear_velocity: 0.06
       approach_velocity_scaling_dist: 0.5
       use_collision_detection: true
@@ -71,7 +77,13 @@ local_costmap:
       width: 6
       height: 6
       resolution: 0.05
-      robot_radius: 0.13
+      # The chassis -- 194 x 168 mm by Waveshare's outline dimensions -- plus
+      # 1 mm a side of margin, so 196 x 170 mm, with base_link at
+      # its centre. robot_radius 0.13 modelled it as a 0.26 m circle, 55% wider
+      # than its sides, so the collision check stopped for walls the rover
+      # would have cleared whenever it was off-centre.
+      footprint: "[[0.098, 0.085], [0.098, -0.085], [-0.098, -0.085], [-0.098, 0.085]]"
+      footprint_padding: 0.01
       transform_tolerance: 0.5
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
@@ -109,7 +121,13 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       resolution: 0.05
-      robot_radius: 0.13
+      # The chassis -- 194 x 168 mm by Waveshare's outline dimensions -- plus
+      # 1 mm a side of margin, so 196 x 170 mm, with base_link at
+      # its centre. robot_radius 0.13 modelled it as a 0.26 m circle, 55% wider
+      # than its sides, so the collision check stopped for walls the rover
+      # would have cleared whenever it was off-centre.
+      footprint: "[[0.098, 0.085], [0.098, -0.085], [-0.098, -0.085], [-0.098, 0.085]]"
+      footprint_padding: 0.01
       track_unknown_space: true
       transform_tolerance: 0.5
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -140,7 +158,12 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.25
+        # At 0.25 the cost fell away within a few cm of the footprint and NavFn
+        # rode its edge: 18.6% of the planned tour within 0.30 m of a wall, and
+        # the legs that hugged walls logged most of the 'collision ahead' stops.
+        # 0.45 halves that (8.9%) for 6% more path; 0.55 bought nothing more.
+        # Global only -- the controller's collision check reads lethal cells.
+        inflation_radius: 0.45
       always_send_full_costmap: False
 
 map_server:

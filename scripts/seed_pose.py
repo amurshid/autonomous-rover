@@ -6,13 +6,14 @@ origin and found itself by global localization over the whole map: measured at
 167s, a 7.89 m jump. From a pose near the truth it refines in seconds instead.
 
     python3 seed_pose.py                    # where it was last seen
-    python3 seed_pose.py --room work_room   # the marked spot, ignore memory
-    python3 seed_pose.py --pose 1.55 7.73 -110
+    python3 seed_pose.py --room work_room   # a room's goal pose, ignore memory
+    python3 seed_pose.py --pose 1.68 7.75 52
 
 By default it starts from wherever rover_pose_memory.py last saw the rover
-standing on free floor, falling back to the work room if that memory is
-missing, unreadable, or older than --max-age. So the rover can be left in the
-kitchen and still wake up knowing roughly where it is.
+standing on free floor, falling back to the charging spot if that memory is
+missing, unreadable, older than --max-age, or forgotten from the mode page. So
+the rover can be left in the kitchen and still wake up knowing roughly where
+it is, and a rover that has lost its memory belongs on the charger.
 
 Either way this is only right if the rover has not been moved since. A
 confident wrong seed is worse than none: the marked spot measured 5.66 m
@@ -47,20 +48,33 @@ from rclpy.node import Node
 sys.path.insert(0, os.path.expanduser("~"))
 from rooms import ROOMS  # noqa: E402
 
-DEFAULT_ROOM = "work_room"          # the fallback, when memory is no good
+# The fallback, when memory is no good: the charging spot, facing the way the
+# rover sits on its charger. Not ROOMS["work_room"], though that is the same
+# spot: a goal's heading is only how the rover arrives (-121 deg there), and
+# seeding with it started Cartographer ~170 deg from the truth, far outside
+# the 20 deg its local search covers. Found by matching the parked rover's
+# scan against the map at every heading: 95% of rays on a wall at 52 deg.
+CHARGING_SPOT = (1.68, 7.75, 52.0)  # x, y, heading in degrees
 SUBSCRIBER_TIMEOUT = 30.0
 LAST_POSE_PATH = os.environ.get("ROVER_LAST_POSE",
                                 "/var/lib/rover/last_pose.json")
 MAX_AGE_S = 12 * 3600              # older than this and it is a guess
 
 
+def yaw_quat(yaw_deg):
+    """(qz, qw) for a heading in degrees."""
+    half = math.radians(yaw_deg) / 2
+    return math.sin(half), math.cos(half)
+
+
 def remembered(path, max_age):
     """(x, y, qz, qw, description) from the saved pose, or None.
 
-    Every reason to distrust it ends the same way -- fall back to the room --
-    so they are all one quiet return rather than a pile of error cases. The
-    only one worth naming out loud is age, since a stale memory means the
-    rover sat somewhere for half a day and the answer may simply be old.
+    Every reason to distrust it ends the same way -- fall back to the charging
+    spot -- so they are all one quiet return rather than a pile of error
+    cases. The only one worth naming out loud is age, since a stale memory
+    means the rover sat somewhere for half a day and the answer may simply be
+    old.
     """
     try:
         with open(path) as f:
@@ -72,7 +86,7 @@ def remembered(path, max_age):
         return None
     if age > max_age:
         print(f"last known pose is {age / 3600:.1f}h old, older than "
-              f"{max_age / 3600:.0f}h -- using {DEFAULT_ROOM} instead")
+              f"{max_age / 3600:.0f}h -- using the charging spot instead")
         return None
     mins = age / 60.0
     when = f"{age:.0f}s ago" if mins < 1 else f"{mins:.0f} min ago"
@@ -97,18 +111,21 @@ def main():
 
     if args.pose:
         x, y, yaw = args.pose
-        qz, qw = math.sin(math.radians(yaw) / 2), math.cos(math.radians(yaw) / 2)
+        qz, qw = yaw_quat(yaw)
         where = f'x={x:.2f} y={y:.2f} yaw={yaw:.0f}deg'
     elif memory:
         x, y, qz, qw, when = memory
         where = f'{when}: x={x:.2f} y={y:.2f}'
-    else:
-        room = args.room or DEFAULT_ROOM
-        if room not in ROOMS:
-            print(f'no such room: {room}. Known: {", ".join(sorted(ROOMS))}')
+    elif args.room:
+        if args.room not in ROOMS:
+            print(f'no such room: {args.room}. Known: {", ".join(sorted(ROOMS))}')
             return 4
-        x, y, qz, qw = ROOMS[room]
-        where = f'{room} (x={x:.2f} y={y:.2f})'
+        x, y, qz, qw = ROOMS[args.room]
+        where = f'{args.room} (x={x:.2f} y={y:.2f})'
+    else:
+        x, y, yaw = CHARGING_SPOT
+        qz, qw = yaw_quat(yaw)
+        where = f'the charging spot (x={x:.2f} y={y:.2f} yaw={yaw:.0f}deg)'
 
     rclpy.init()
     node = Node('seed_pose')
