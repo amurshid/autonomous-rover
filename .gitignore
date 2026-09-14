@@ -69,3 +69,7 @@ house_map.yaml
 # A copy of the rover's files from before this repository tracked them.
 # It stays on this machine.
 rover_backup/
+
+# The real room table: a floor plan of a private home, and who sleeps where.
+# Lives on the rover only. See scripts/rooms_local.example.py.
+rooms_local.py
