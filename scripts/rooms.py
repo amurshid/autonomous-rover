@@ -12,7 +12,7 @@ The table itself is not in this repository. A list of rooms with coordinates
 is a floor plan of a real home, and who sleeps in which one is nobody else's
 business, so ROOMS, PEOPLE, SPOKEN and the personal aliases live in
 rooms_local.py beside this file on the rover. .gitignore keeps it untracked.
-See rooms_local.example.py for the shape.
+See rooms_local.template.py for the shape.
 
 Without that file ROOMS is empty and nothing will navigate. That is
 deliberate. A sample table would be another house's coordinates, and a rover

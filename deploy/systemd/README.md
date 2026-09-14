@@ -359,6 +359,25 @@ effect on `enable` -- without it `rover-teleop.target` comes up active with no
 service under it, nothing listens on 8080, and the page has a mode selected
 that never finishes arriving.
 
+### Files the units expect that git does not carry
+
+The scripts deploy to `/home/amurshid/`, but some of what the rover needs is
+deliberately untracked -- a room table is a floor plan of a real home, and a
+key is a key:
+
+| file | what it is | where it comes from |
+|---|---|---|
+| `~/rooms_local.py` | the room table, and who is in which room | copy `scripts/rooms_local.template.py` and fill it in |
+| `~/house.pbstream` | the map Cartographer localises against | built by mapping the house |
+| `~/house_map.pgm`, `~/house_map.yaml` | the occupancy map Nav2 plans on | exported from the same mapping session |
+| `/etc/rover/env` | the Groq key | see **The API key** below |
+
+Without `rooms_local.py` the room buttons disappear and `python3 ~/rooms.py`
+exits 1 saying why. It will not fall back to the template: those are another
+house's coordinates, and a rover driving to them finds a wall rather than a
+kitchen. Copy it to `~/`, beside `rooms.py` -- not into the clone, which never
+tracks it.
+
 ## Battery and temperature
 
 Both web pages show the Pi's temperature, read from the thermal zone, amber at
