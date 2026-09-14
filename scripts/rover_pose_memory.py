@@ -11,9 +11,9 @@ Sampled, not subscribed
 /tracked_pose runs at ~192 Hz and a resident subscriber costs about 40% of a
 core here -- measured as the difference between track_pose on and off in
 rover_nav.py, on a Pi that is already the constraint. So the subscriptions are
-created, used for one scan and one pose, and destroyed again, every 30
-seconds. A pose half a minute stale is fine for a rover that moves at 0.5 m/s
-and is usually parked.
+created, used for one scan and one pose, and destroyed again, every few
+seconds -- about 1% of a core at the 4s period, measured against 0.16% at the
+30s one this started with.
 
 What is worth saving
 --------------------
@@ -53,7 +53,12 @@ from sensor_msgs.msg import LaserScan
 
 STATE_PATH = os.environ.get("ROVER_LAST_POSE",
                             "/var/lib/rover/last_pose.json")
-SAMPLE_PERIOD_S = 30.0
+# Every 4s, not the 30s this started with. A save is refused whenever the scan
+# disagrees, and at 30s that left the memory minutes and metres stale before a
+# power cut -- a clean pose from the wrong end of a corridor. Sampling costs
+# 0.16% of a core at 30s, so this is about 1%, and the last good pose is now
+# seconds old.
+SAMPLE_PERIOD_S = 4.0
 SAMPLE_TIMEOUT_S = 3.0
 FREE_MAX = 20          # occupancy 0-100; anything above this is not open floor
 MAP_YAML = os.environ.get("ROVER_MAP_YAML", "/home/amurshid/house_map.yaml")

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Compare every deployed file against the repo. Regenerated on the Mac
-# whenever repo files change. Snapshot taken 2026-09-11 16:05.
+# whenever repo files change. Snapshot taken 2026-09-14 00:03.
 cat >/dev/shm/rover.manifest <<'MANIFEST'
 06403e1003d14166  /home/amurshid/odom_publisher.py
 81ad1aca9305fd1a  /home/amurshid/patrol.py
@@ -11,11 +11,11 @@ fb791e76f0f65181  /home/amurshid/rooms.py
 4926d2f89d43cf87  /home/amurshid/rover_mode_web.py
 890fe862348c13a7  /home/amurshid/rover_motions.py
 853ebeae7d39678c  /home/amurshid/rover_nav.py
-978c3eb7e5153de7  /home/amurshid/rover_pose_memory.py
+332464b74809d85d  /home/amurshid/rover_pose_memory.py
 78f0d8e499361378  /home/amurshid/rover_serial_peek.py
 e03be623fd4453ce  /home/amurshid/rover_teleop_web.py
 acb9c4b3340eda9c  /home/amurshid/rover_voice.py
-88b0dfb271d6aac6  /home/amurshid/seed_pose.py
+5af3f12dcc5e10b2  /home/amurshid/seed_pose.py
 bf363702f18ee9d2  /home/amurshid/set_initial_pose.py
 38cf1ef62990d3c1  /home/amurshid/tf_watch.py
 4fce68c48e652846  /home/amurshid/voice_chat.py
