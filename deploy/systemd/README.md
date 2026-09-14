@@ -264,6 +264,55 @@ than subscribing to `/map`, because `map_server` is part of Nav2 and Nav2 must
 not run during remote control. A `Requires=` on Nav2 would have started the
 planner in the one mode whose whole point is that a human is driving.
 
+### Putting the camera relocaliser back in the boot
+
+`rover-relocalise.service` is installed but its `[Install]` section is empty,
+so nothing ever starts it, and `seed_pose.py` asserts the remembered pose
+instead. To run it once by hand, with Cartographer already up:
+
+    sudo systemctl start rover-relocalise
+
+It pulls the camera up through `Requires=`, publishes one camera-derived pose
+and exits. Do not use `start_localization.sh` while the stack is running: it
+starts a second `set_initial_pose.py`, and `rover-initialpose` is already
+running one. Two of those bridging `/initialpose` to Cartographer's trajectory
+services looks exactly like localisation misbehaving.
+
+To put it in the boot, four files change:
+
+| file | change |
+|---|---|
+| `rover-relocalise.service` | `After=` and `Requires=` become `rover-seedpose.service rover-camera.service`; `PartOf=` becomes `rover-common.target rover-cartographer.service`; add `WantedBy=rover-common.target` |
+| `rover-camera.service` | `PartOf=` and `WantedBy=` become `rover-common.target` |
+| `rover-nav2.service` | `After=` gains `rover-relocalise.service` |
+| `rover_mode_web.py` | the autonomous checklist gains `rover-camera` and `rover-relocalise` |
+
+Then `sudo systemctl reenable rover-relocalise rover-camera`, because those
+`[Install]` sections moved.
+
+**It runs after `rover-seedpose`, not instead of it.** The seed asserts the
+remembered pose immediately and costs nothing; the relocaliser then overrides
+it with what the camera actually sees. When no frame matches well enough it
+exits 2, which counts as success by design, and the seed stands -- so the
+fallback is exactly the normal behaviour rather than a worse one.
+
+That closes the one hole the pose memory cannot. A rover moved while switched
+off comes back with a memory that is fresh, sits on free floor, and is wrong;
+nothing running can detect it. The camera does not care what the file says.
+
+Nav2 waits on it, as it did before the relocaliser left the boot. The unit is
+oneshot with `RemainAfterExit`, so `After=` means "after it has finished", not
+"after it has started".
+
+The cost is the camera. It moves to `rover-common.target` and becomes a sensor
+rather than a remote-control feature, which reverses the saving made by
+keeping it out of autonomous -- worth roughly a core when the stream
+misbehaved. Measure it before trusting this on a 2GB Pi.
+
+Needs `~/bundle` (from `vpr/deploy/export.py`) and `~/vpr-venv` on the Pi.
+`vpr_relocalise.py --self-test` and `--bench` import no ROS and need no
+camera, so check both before wiring it into a boot.
+
 ## What systemd can and cannot guarantee
 
 `After=` orders **starts**, not readiness. It cannot know when the lidar is
